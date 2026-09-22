@@ -69,6 +69,8 @@ FD_EXTENSION_SUBDIR(app_sip     "Diameter SIP Authentication and Authorization s
 
 FD_EXTENSION_SUBDIR(app_redirect "Diameter Redirect server: send configurable Redirect indications to other peers" OFF)
 
+FD_EXTENSION_SUBDIR(app_dea "Diameter Edge Agent: topology hiding and edge routing policies" OFF)
+
 
 ####
 # Routing extensions

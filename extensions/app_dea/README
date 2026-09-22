@@ -1,0 +1,162 @@
+app_dea : Diameter Edge Agent extension for freeDiameter
+==========================================================
+
+This extension turns a plain freeDiameter relay into a Diameter Edge Agent
+(DEA): a node positioned at the boundary between a trusted (internal)
+Diameter network and the outside world (roaming partners, interconnect,
+other operators), enforcing privacy, security and routing policy on
+messages crossing that boundary.
+
+This is a multi-phase effort. This README tracks what is implemented and
+what remains, so the extension can be extended without losing sight of the
+full target scope.
+
+
+Core mechanism (how it hooks into freeDiameter)
+------------------------------------------------
+
+freeDiameter routing pipeline, for a message that is not handled locally
+(see include/freeDiameter/libfdcore.h, "ROUTING" section):
+
+  received -> routing-in -> [fd_rt_fwd_register callbacks] -> routing-out -> sent
+
+The daemon itself adds a Route-Record AVP for the sending peer BEFORE our
+forwarding callback runs (p_psm.c), and routing-out uses Route-Record to
+avoid sending a message back the way it came. This means our egress callback
+sees the "real" Route-Record chain and can safely rewrite it before the
+routing-out logic consumes it.
+
+- `dea_fwd_req` is registered with `RT_FWD_REQ`: runs on every forwarded
+  request. This is where masking happens.
+- `dea_fwd_ans` is registered with `RT_FWD_ANS`: runs on the matching
+  answer. The daemon associates every answer with its request via the
+  Hop-by-Hop Id automatically, so `fd_hook_get_request_pmd()` reliably
+  retrieves whatever we stashed on the request.
+- Request/answer correlation uses `fd_hook_data_register` +
+  `fd_hook_get_pmd` / `fd_hook_get_request_pmd` (libfdcore.h). This gives a
+  scratch struct (`struct fd_hook_permsgdata`, defined in app_dea.h) that
+  lives exactly as long as one transaction. It does NOT persist across a
+  whole Diameter session (multiple transactions sharing a Session-Id) --
+  see "Session-Id pseudonymization" below for what that requires instead.
+
+
+Phase 1 -- IMPLEMENTED
+------------------------
+
+Topology hiding for the internal -> external direction:
+
+- Peer/realm classification via config (`internal_realm` directives).
+  A request is masked only when `Origin-Realm` matches a configured
+  internal realm AND `Destination-Realm` does not (fail-safe: anything
+  ambiguous, e.g. a missing AVP, is left untouched rather than risk
+  mangling legitimate internal traffic).
+- `Origin-Host` masking: the real value is saved into the per-transaction
+  data and replaced with the configured `hidden_identity` pseudonym.
+- `Route-Record` masking: all instances are stripped and replaced with a
+  single entry carrying `hidden_identity`, so the DEA itself remains
+  attributable without exposing the internal hop chain.
+- Config parser (`dea_conf.y` / `dea_conf.l`), following the same
+  Flex/Bison pattern as `app_redirect` and `rt_rewrite`.
+
+Deliberately NOT done in Phase 1 (tracked below): Origin-Realm is left
+untouched (partners need it for routing/billing -- only node identity is
+sensitive, not the operator realm), Session-Id is left untouched, CER/CEA
+capability exchange is left untouched, nothing is enforced about which
+Application-Ids are allowed to cross the boundary.
+
+
+Phase 2 -- Session & subscriber identity privacy
+--------------------------------------------------
+
+These need state that outlives a single transaction, unlike Phase 1's
+per-message hook data. Candidate storage: a hash table keyed by masked
+value -> real value, with TTL aligned to session lifetime (or
+`fd_sess_state_store` / `fd_sess_state_retrieve` on the `struct session`
+object obtained via `fd_msg_sess_get`, if every message of interest reliably
+carries a Session-Id).
+
+- **Session-Id rewriting with collision avoidance**: Session-Id AVPs
+  commonly embed the creating node's Diameter Identity as their first
+  segment (`DiameterIdentity;hi32;lo32[;opt]`, RFC 6733 §8.8). Left as-is,
+  this leaks the real internal Origin-Host for the entire session lifetime,
+  defeating Origin-Host masking on every subsequent message of the same
+  session. Needs: generate a masked Session-Id on the first request of a
+  session, store the real<->masked mapping, rewrite it on every message of
+  that session in both directions, guarantee uniqueness (collision check
+  against the mapping table, not just local randomness).
+- **Reversible pseudonym scheme for HSS/MME/subscriber identity**: IMSI and
+  other subscriber identifiers appearing in AVPs (e.g. User-Name,
+  Subscription-Id) are not topology per se but are similarly sensitive
+  across a roaming boundary in some deployments. Needs a policy decision
+  (which AVPs, which direction) before implementation -- flagged here, not
+  designed yet.
+- **IMSI/HSS/MME stateful mapping store leakage risks**: whatever store
+  backs the above must itself not become a new leakage point (access
+  control, at-rest protection, bounded TTL, no cross-tenant bleed in a
+  multi-tenant deployment).
+
+
+Phase 3 -- Interconnect policy & fraud detection
+---------------------------------------------------
+
+- **Application-Id allow-list for interconnect**: reject/drop requests
+  whose `Application-Id` (message header, see `struct msg_hdr.msg_appl`)
+  is not on a per-peer or per-realm allow-list. Natural fit for a second
+  `fd_rt_fwd_register(..., RT_FWD_REQ, ...)` callback (or a branch inside
+  `dea_fwd_req`), returning an error answer via
+  `fd_msg_new_answer_from_req` + `fd_msg_rescode_set` + `fd_msg_send` (same
+  idiom `app_redirect`/`rt_rewrite` use for in-place request -> answer
+  conversion).
+- **Fraud detection for spoofed roaming messages**: rule-based checks
+  correlating claimed Origin-Realm/Origin-Host against the actual
+  connected peer identity (`fd_msg_source_get` / `fd_peer_getbyid`) and
+  against Route-Record consistency; rate-limiting/anomaly rules per peer.
+  Needs a rule engine and a decision on false-positive handling
+  (log-only vs. reject) before implementation.
+- **CER/CEA / handshake fingerprint leaks**: freeDiameter's Capabilities
+  Exchange (product name, firmware revision, supported
+  Vendor-Id/Application-Id lists, and IP addresses in Host-IP-Address) is
+  handled entirely in libfdcore, before any extension hook runs -- there is
+  currently no extension hook point for CER/CEA content. Addressing this
+  requires either a core-level change (out of scope for an extension) or
+  running a separate stripped-down "mask" identity/instance at the network
+  edge. Flagged as a known gap, not solvable purely as an app_dea feature.
+
+
+Phase 4 -- Operability: HA, observability, performance
+----------------------------------------------------------
+
+- **High availability / failover**: freeDiameter's own peer/routing-out
+  scoring (`fd_rt_out_register`, `FD_SCORE_*`) already provides multi-peer
+  failover for the next hop; what's missing here is DEA-specific state
+  replication (the Phase 2 Session-Id mapping table) across redundant DEA
+  instances, so a failover mid-session doesn't break topology hiding for
+  in-flight sessions.
+- **Metrics / privacy-aware observability**: counters and logs must not
+  themselves leak what Phase 1/2 just hid (e.g. never log the real
+  Origin-Host at a level that reaches external-facing dashboards). Natural
+  fit for `fd_hook_register` on `HOOK_MESSAGE_ROUTING_FORWARD` /
+  `HOOK_MESSAGE_SENT` / `HOOK_MESSAGE_RECEIVED` (read-only hooks, see
+  `dbg_msg_timings` for the pattern) feeding metrics rather than rewriting.
+- **Throttling**: per-peer / per-realm rate limiting, likely alongside the
+  fraud-detection rule engine (Phase 3).
+- **Testing**: fuzzing the config parser and the AVP-rewrite paths
+  (malformed/oversized AVPs, repeated Route-Record floods, missing
+  mandatory AVPs), plus dictionary coverage checks so masking rules don't
+  silently no-op when a dictionary extension isn't loaded.
+- **Performance targets**: not yet defined; needs a number (msgs/sec,
+  p99 added latency) from whoever owns the deployment before it can drive
+  design choices (e.g. whether the Session-Id map needs to be lock-free).
+
+
+Known limitations of the current code
+----------------------------------------
+
+- Only `Origin-Host` and `Route-Record` are masked; anything else carrying
+  topology information (Session-Id, Proxy-Info, vendor-specific AVPs with
+  embedded hostnames) passes through unchanged -- see Phase 2/3.
+- Masking runs on every internal->external request unconditionally once
+  configured; there is no per-peer opt-out yet (e.g. a partner you
+  deliberately don't hide topology from).
+- `dea_fwd_ans` currently only logs; it is the intended integration point
+  for Phase 2/3 features that need to act on the answer path.

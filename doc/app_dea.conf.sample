@@ -1,0 +1,47 @@
+# This file contains the configuration for the app_dea extension of freeDiameter.
+#
+# app_dea implements a Diameter Edge Agent (DEA): a relay positioned at the
+# boundary of a trusted (internal) Diameter network and the outside world
+# (roaming partners, interconnect, ...).
+#
+# Phase 1 of this extension implements TOPOLOGY HIDING: when a request
+# originates from one of the configured "internal" realms and is being
+# forwarded towards any other realm, its Origin-Host is replaced by a fixed
+# pseudonym identity, and any Route-Record AVP added by internal peers is
+# stripped and replaced by that same pseudonym. This prevents external peers
+# from learning the real hostnames of your internal Diameter nodes (HSS, MME,
+# PCRF, ...).
+#
+# See extensions/app_dea/README for the full architecture and the roadmap of
+# features not yet implemented (Session-Id pseudonymization, IMSI/subscriber
+# identity mapping, fraud-detection rules, high-availability, observability).
+
+# Lines starting with # are comments and ignored.
+# Spaces and newlines are not meaningful, except inside quoted areas.
+
+#########################################################################################
+
+## hidden_identity
+# The Diameter Identity to present to external peers instead of the real
+# Origin-Host of internal nodes, and instead of the real Route-Record chain.
+# This is normally the DEA's own public-facing hostname.
+# Topology hiding is DISABLED entirely until this is set.
+hidden_identity = "dea-edge1.operator.net";
+
+## internal_realm
+# Declare a realm as "internal" / trusted. Topology hiding is applied to a
+# request only when its Origin-Realm matches one of these entries AND its
+# Destination-Realm does NOT match any of them (i.e. the message is actually
+# leaving the internal network). Repeat this directive for each internal realm.
+internal_realm = "epc.mnc001.mcc001.3gppnetwork.org";
+#internal_realm = "internal.operator.net";
+
+## hide_origin_host
+# Enable/disable masking of the Origin-Host AVP. Default: 1 (enabled).
+#hide_origin_host = 1;
+
+## hide_route_record
+# Enable/disable stripping and replacement of Route-Record AVPs. Default: 1 (enabled).
+#hide_route_record = 1;
+
+#########################################################################################
