@@ -37,7 +37,16 @@ routing-out logic consumes it.
   scratch struct (`struct fd_hook_permsgdata`, defined in app_dea.h) that
   lives exactly as long as one transaction. It does NOT persist across a
   whole Diameter session (multiple transactions sharing a Session-Id) --
-  see "Session-Id pseudonymization" below for what that requires instead.
+  see "Phase 2" below for what that requires instead.
+- Session-scoped state (Phase 2, Session-Id pairing) uses freeDiameter's own
+  session store instead: `fd_msg_sess_get()` resolves/creates a
+  `struct session` from a message's Session-Id AVP, and
+  `fd_sess_handler_create` + `fd_sess_state_store` / `fd_sess_state_retrieve`
+  attach our own data to it (`struct sess_state`, defined in app_dea.h). This
+  is a different mechanism from the per-transaction hook data above: it is
+  keyed by Session-Id content (not by Hop-by-Hop Id) and survives for the
+  configured `session_id_lifetime` of inactivity, i.e. across the whole
+  Diameter session, not just one request/answer pair.
 
 
 Phase 1 -- IMPLEMENTED
@@ -60,36 +69,86 @@ Topology hiding for the internal -> external direction:
 
 Deliberately NOT done in Phase 1 (tracked below): Origin-Realm is left
 untouched (partners need it for routing/billing -- only node identity is
-sensitive, not the operator realm), Session-Id is left untouched, CER/CEA
-capability exchange is left untouched, nothing is enforced about which
-Application-Ids are allowed to cross the boundary.
+sensitive, not the operator realm), Session-Id is left untouched (see
+Phase 2), CER/CEA capability exchange is left untouched, nothing is
+enforced about which Application-Ids are allowed to cross the boundary.
 
 
-Phase 2 -- Session & subscriber identity privacy
---------------------------------------------------
+Phase 2 -- Session-Id pseudonymization -- IMPLEMENTED (opt-in)
+------------------------------------------------------------------
 
-These need state that outlives a single transaction, unlike Phase 1's
-per-message hook data. Candidate storage: a hash table keyed by masked
-value -> real value, with TTL aligned to session lifetime (or
-`fd_sess_state_store` / `fd_sess_state_retrieve` on the `struct session`
-object obtained via `fd_msg_sess_get`, if every message of interest reliably
-carries a Session-Id).
+Session-Id AVPs commonly embed the creating node's Diameter Identity as
+their first segment (`DiameterIdentity;hi32;lo32[;opt]`, RFC 6733 §8.8).
+Left as-is, this leaks the real internal Origin-Host for the entire session
+lifetime, defeating Phase 1's Origin-Host masking on every subsequent
+message of the same session. `hide_session_id` (default OFF, see below)
+closes this gap: on the first internal->external message of a session, the
+Session-Id is replaced with a generated pseudonym, and every later message
+of that session -- in both directions, requests and answers -- is
+consistently rewritten between the real and masked value.
 
-- **Session-Id rewriting with collision avoidance**: Session-Id AVPs
-  commonly embed the creating node's Diameter Identity as their first
-  segment (`DiameterIdentity;hi32;lo32[;opt]`, RFC 6733 §8.8). Left as-is,
-  this leaks the real internal Origin-Host for the entire session lifetime,
-  defeating Origin-Host masking on every subsequent message of the same
-  session. Needs: generate a masked Session-Id on the first request of a
-  session, store the real<->masked mapping, rewrite it on every message of
-  that session in both directions, guarantee uniqueness (collision check
-  against the mapping table, not just local randomness).
+- **Why opt-in, not default-on like Phase 1**: RFC 6733 expects relay/proxy
+  agents to leave Session-Id untouched -- it is meant to stay constant
+  end-to-end for session correlation and CDR reconciliation between
+  operators. Rewriting it is a deliberate, documented deviation (as used by
+  real DEA deployments per GSMA IR.88) made only for topology-hiding
+  privacy, not something to silently turn on for every operator.
+- **Storage**: reuses freeDiameter's own session store (`fd_sess_*` in
+  libfdproto.h) rather than a custom hash table. `fd_msg_sess_get()` on the
+  live message resolves the real session; a masked pseudonym session is
+  registered with `fd_sess_fromsid()`. Each side stores the *other* side's
+  Session-Id string as its `struct sess_state` (`fd_sess_handler_create` /
+  `fd_sess_state_store` / `fd_sess_state_retrieve`).
+- **Why `fd_sess_fromsid()` and not `fd_sess_new()` to mint the masked
+  session**: `fd_sess_new()`'s doc states the new session's initial message
+  refcount is 1, released only once a live `struct msg` attaches to it via
+  `fd_msg_sess_get()`. Our synthetic masked session has no guarantee of ever
+  getting such an attachment on its own, which would pin it in memory
+  forever (confirmed by reading `libfdproto/sessions.c` directly, not just
+  the header doc). `fd_sess_fromsid()` does not touch that refcount, so we
+  generate the RFC-shaped Session-Id string ourselves (mirroring
+  `fd_sess_new()`'s own `DiamId;hi32;lo32` format, see `gen_masked_sid()` in
+  `dea_hiding.c`) and register it with `fd_sess_fromsid()` instead.
+- **Retrieve is destructive**: `fd_sess_state_retrieve()`'s doc says the
+  state is detached from the session once retrieved -- a new
+  `fd_sess_state_store()` is required to keep it attached. Every read in
+  `dea_rewrite_session_id()` immediately stores it back. Without
+  synchronization this is a race between two threads handling two messages
+  of the same brand-new session concurrently (both could see "no pairing"
+  and mint two different masked Session-Ids for the same real session), so
+  the whole retrieve-then-restore-or-mint sequence runs under one global
+  mutex (`dea_sid_lock`). This is a known Phase 4 scalability limit (it
+  serializes Session-Id rewriting across *all* sessions, not just
+  same-session concurrent access) -- acceptable for this foundation, flagged
+  for revisiting if profiling ever shows contention.
+- **Pairing expiry**: both sides of a pairing get their
+  `fd_sess_settimeout()` refreshed to the *same* timestamp on every reuse
+  (`session_id_lifetime` config, default 86400s of inactivity). Both
+  therefore expire together in the same expiry-thread pass. We deliberately
+  do NOT cross-destroy the paired session from within the cleanup callback
+  (i.e. have session A's cleanup call `fd_sess_destroy()` on session B): the
+  reentrancy of that call (B's own cleanup firing while A's is still
+  running, immediately trying to destroy A again) could not be fully
+  verified as safe by reading `libfdproto/sessions.c` alone, and the
+  same-timestamp approach already achieves synchronized expiry without that
+  risk.
+- **NOT done in Phase 2**: reversible pseudonyms for subscriber identity
+  (IMSI, User-Name, Subscription-Id -- see below), and no attempt to detect
+  or reject a masked Session-Id being reused/replayed by a malicious peer
+  (see Phase 3 fraud detection).
+
+
+Phase 2.5 -- Subscriber identity privacy (not started)
+------------------------------------------------------------
+
 - **Reversible pseudonym scheme for HSS/MME/subscriber identity**: IMSI and
   other subscriber identifiers appearing in AVPs (e.g. User-Name,
   Subscription-Id) are not topology per se but are similarly sensitive
   across a roaming boundary in some deployments. Needs a policy decision
   (which AVPs, which direction) before implementation -- flagged here, not
-  designed yet.
+  designed yet. Could reuse the same `fd_sess_*`-backed pairing mechanism
+  built for Session-Id in Phase 2, or a dedicated store if the lifetime/scope
+  needed differs (e.g. a pseudonym stable across sessions, not per-session).
 - **IMSI/HSS/MME stateful mapping store leakage risks**: whatever store
   backs the above must itself not become a new leakage point (access
   control, at-rest protection, bounded TTL, no cross-tenant bleed in a
@@ -129,9 +188,11 @@ Phase 4 -- Operability: HA, observability, performance
 - **High availability / failover**: freeDiameter's own peer/routing-out
   scoring (`fd_rt_out_register`, `FD_SCORE_*`) already provides multi-peer
   failover for the next hop; what's missing here is DEA-specific state
-  replication (the Phase 2 Session-Id mapping table) across redundant DEA
-  instances, so a failover mid-session doesn't break topology hiding for
-  in-flight sessions.
+  replication -- Phase 2's Session-Id pairings live in each instance's own
+  in-memory session store, so a failover mid-session currently loses the
+  mapping (the session gets a fresh masked pseudonym on its next message,
+  which is safe but changes the identity the external partner sees
+  mid-session) across redundant DEA instances.
 - **Metrics / privacy-aware observability**: counters and logs must not
   themselves leak what Phase 1/2 just hid (e.g. never log the real
   Origin-Host at a level that reaches external-facing dashboards). Natural
@@ -146,17 +207,25 @@ Phase 4 -- Operability: HA, observability, performance
   silently no-op when a dictionary extension isn't loaded.
 - **Performance targets**: not yet defined; needs a number (msgs/sec,
   p99 added latency) from whoever owns the deployment before it can drive
-  design choices (e.g. whether the Session-Id map needs to be lock-free).
+  design choices -- Phase 2's single global `dea_sid_lock` (see above) is
+  the first thing to revisit if a target requires it.
 
 
 Known limitations of the current code
 ----------------------------------------
 
-- Only `Origin-Host` and `Route-Record` are masked; anything else carrying
-  topology information (Session-Id, Proxy-Info, vendor-specific AVPs with
-  embedded hostnames) passes through unchanged -- see Phase 2/3.
+- Origin-Host, Route-Record, and (opt-in) Session-Id are masked; anything
+  else carrying topology information (Proxy-Info, vendor-specific AVPs with
+  embedded hostnames) passes through unchanged -- see Phase 2.5/3.
 - Masking runs on every internal->external request unconditionally once
   configured; there is no per-peer opt-out yet (e.g. a partner you
   deliberately don't hide topology from).
-- `dea_fwd_ans` currently only logs; it is the intended integration point
-  for Phase 2/3 features that need to act on the answer path.
+- All Session-Id rewriting is serialized behind one global mutex
+  (`dea_sid_lock` in `dea_hiding.c`) -- correct but not scalable past
+  whatever throughput that single critical section can sustain; see Phase 4.
+- Session-Id pairings are process-local (no replication across redundant DEA
+  instances) and are not persisted across a restart of the extension/daemon;
+  see Phase 4 (HA).
+- `dea_fwd_ans` handles Session-Id un/re-masking but otherwise only logs for
+  Origin-Host/Route-Record; it is the intended integration point for
+  Phase 3 features that need to act further on the answer path.

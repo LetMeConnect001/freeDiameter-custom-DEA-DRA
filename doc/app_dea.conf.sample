@@ -44,4 +44,25 @@ internal_realm = "epc.mnc001.mcc001.3gppnetwork.org";
 # Enable/disable stripping and replacement of Route-Record AVPs. Default: 1 (enabled).
 #hide_route_record = 1;
 
+## hide_session_id
+# Enable/disable Session-Id pseudonymization: for the same internal -> external crossing
+# defined by internal_realm above, the Session-Id AVP is replaced with a generated pseudonym
+# for the lifetime of the whole Diameter session (which spans many request/answer
+# transactions, not just one), and rewritten back and forth consistently on every subsequent
+# message of that session, in both directions.
+#
+# Default: 0 (DISABLED). This is deliberately opt-in: RFC 6733 (Diameter base protocol)
+# expects relay/proxy agents to NOT modify Session-Id -- it must stay constant end-to-end for
+# session correlation and CDR reconciliation between operators. Enabling this is a conscious
+# deviation from that standard behavior, made only for topology-hiding privacy purposes (as
+# documented for DEA nodes in GSMA IR.88). See extensions/app_dea/README before enabling it.
+#hide_session_id = 0;
+
+## session_id_lifetime
+# How many seconds of inactivity before a Session-Id pairing (real <-> masked) expires and is
+# forgotten. A session that goes quiet for longer than this and then sends another message will
+# simply get a brand new masked pseudonym (not an error, just a fresh mapping). Default: 86400
+# (24h). Only meaningful if hide_session_id is enabled.
+#session_id_lifetime = 86400;
+
 #########################################################################################

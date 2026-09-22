@@ -69,6 +69,8 @@ qstring		\"[^\"\n]*\"
 (?i:"internal_realm")		{ return TOK_INTERNAL_REALM;		}
 (?i:"hide_origin_host")	{ return TOK_HIDE_ORIGIN_HOST;		}
 (?i:"hide_route_record")	{ return TOK_HIDE_ROUTE_RECORD;	}
+(?i:"hide_session_id")		{ return TOK_HIDE_SESSION_ID;		}
+(?i:"session_id_lifetime")	{ return TOK_SESSION_ID_LIFETIME;	}
 
 	/* Valid single characters for yyparse */
 [:=;]		{ return yytext[0]; }

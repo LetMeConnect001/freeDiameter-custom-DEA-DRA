@@ -27,7 +27,9 @@ static struct dea_config local_conf = {
 	.hidden_id_len = 0,
 	.internal_realms = FD_LIST_INITIALIZER(local_conf.internal_realms),
 	.hide_origin_host = 1,
-	.hide_route_record = 1
+	.hide_route_record = 1,
+	.hide_session_id = 0,		/* opt-in: deviates from RFC 6733 relay behavior, see README */
+	.session_id_lifetime = 86400	/* 24h of inactivity before a Session-Id pairing expires */
 };
 struct dea_config * dea_conf = &local_conf;
 
@@ -42,6 +44,8 @@ static void dea_conf_dump(void)
 	fd_log_debug("   hidden_identity    : %s", dea_conf->hidden_id ? (char *)dea_conf->hidden_id : "(not set -- topology hiding DISABLED)");
 	fd_log_debug("   hide_origin_host   : %s", dea_conf->hide_origin_host ? "yes" : "no");
 	fd_log_debug("   hide_route_record  : %s", dea_conf->hide_route_record ? "yes" : "no");
+	fd_log_debug("   hide_session_id    : %s", dea_conf->hide_session_id ? "yes" : "no");
+	fd_log_debug("   session_id_lifetime: %u sec", dea_conf->session_id_lifetime);
 	fd_log_debug("   internal realms:");
 	for (li = dea_conf->internal_realms.next; li != &dea_conf->internal_realms; li = li->next) {
 		struct dea_realm * r = li->o;
@@ -126,6 +130,8 @@ void yyerror (YYLTYPE *ploc, char * conffile, char const *s)
 %token 		TOK_INTERNAL_REALM
 %token 		TOK_HIDE_ORIGIN_HOST
 %token 		TOK_HIDE_ROUTE_RECORD
+%token 		TOK_HIDE_SESSION_ID
+%token 		TOK_SESSION_ID_LIFETIME
 
 
 /* -------------------------------------- */
@@ -176,6 +182,16 @@ directive:		TOK_HIDDEN_IDENTITY '=' TOK_QSTRING ';'
 			TOK_HIDE_ROUTE_RECORD '=' TOK_U32VAL ';'
 			{
 				dea_conf->hide_route_record = $3 ? 1 : 0;
+			}
+			|
+			TOK_HIDE_SESSION_ID '=' TOK_U32VAL ';'
+			{
+				dea_conf->hide_session_id = $3 ? 1 : 0;
+			}
+			|
+			TOK_SESSION_ID_LIFETIME '=' TOK_U32VAL ';'
+			{
+				dea_conf->session_id_lifetime = $3;
 			}
 			;
 
