@@ -232,6 +232,8 @@ static int mint_session_pairing(struct msg * msg, struct session * sess)
 	refresh_pairing_timeout(sess, masked_sess);
 
 	ret = rewrite_session_id_avp(msg, masked_sid, masked_sidlen);
+	if (ret == 0)
+		dea_stats_inc(DEA_STAT_SESSION_ID_MINTED);
 
 	TRACE_DEBUG(FULL, "app_dea: minted a masked Session-Id pairing (real '%.*s' <-> masked '%.*s')",
 		(int)real_sidlen, (char *)real_sid, (int)masked_sidlen, (char *)masked_sid);
@@ -268,6 +270,8 @@ int dea_rewrite_session_id(struct msg * msg, int may_mint)
 		CHECK_FCT_DO( fd_sess_state_store(dea_sid_hdl, sess, &put_back), { ret = __ret__; goto out; } );
 
 		ret = rewrite_session_id_avp(msg, st->peer_sid, st->peer_sid_len);
+		if (ret == 0)
+			dea_stats_inc(DEA_STAT_SESSION_ID_REUSED);
 		goto out;
 	}
 
@@ -293,9 +297,11 @@ int dea_fwd_req(void * cbdata, struct msg ** msg)
 	TRACE_ENTRY("%p %p", cbdata, msg);
 	CHECK_PARAMS(msg && *msg);
 
-	if (!dea_conf->hidden_id)
-		return 0; /* topology hiding not configured */
+	dea_stats_inc(DEA_STAT_REQUESTS_SEEN);
 
+	/* Determine from_internal/to_internal once: needed both by Phase 3's policy checks below
+	 * (independent of whether topology hiding itself is configured) and by the masking logic
+	 * further down. */
 	CHECK_FCT( fd_msg_search_avp(*msg, dea_avp_origin_realm, &avp) );
 	if (avp) {
 		CHECK_FCT( fd_msg_avp_hdr(avp, &ahdr) );
@@ -309,6 +315,26 @@ int dea_fwd_req(void * cbdata, struct msg ** msg)
 		if (ahdr->avp_value)
 			to_internal = dea_is_internal_realm(ahdr->avp_value->os.data, ahdr->avp_value->os.len);
 	}
+
+	/* Phase 3: interconnect policy & fraud detection apply to any request from an external
+	 * peer, independent of whether Phase 1/2 topology hiding is configured below (an operator
+	 * may want Phase 3's protections without hidden_id being set). */
+	if (!from_internal) {
+		int rejected;
+
+		dea_stats_inc(DEA_STAT_EXTERNAL_REQUESTS);
+
+		CHECK_FCT( dea_check_fraud(msg, &rejected) );
+		if (rejected)
+			return 0;
+
+		CHECK_FCT( dea_check_interconnect(msg, &rejected) );
+		if (rejected)
+			return 0;
+	}
+
+	if (!dea_conf->hidden_id)
+		return 0; /* topology hiding not configured */
 
 	if (!from_internal || to_internal) {
 		/* Not an internal -> external transition: leave Origin-Host/Route-Record untouched
@@ -329,6 +355,7 @@ int dea_fwd_req(void * cbdata, struct msg ** msg)
 		return 0;
 	}
 	pmd->masked = 1;
+	dea_stats_inc(DEA_STAT_TOPOLOGY_MASKED);
 
 	if (dea_conf->hide_origin_host) {
 		CHECK_FCT( mask_origin_host(*msg, pmd) );
@@ -340,8 +367,20 @@ int dea_fwd_req(void * cbdata, struct msg ** msg)
 		CHECK_FCT( dea_rewrite_session_id(*msg, 1) );
 	}
 
-	TRACE_DEBUG(FULL, "app_dea: topology-hid a request towards an external realm (real Origin-Host was '%.*s')",
-		(int)pmd->orig_origin_host_len, pmd->orig_origin_host ? (char *)pmd->orig_origin_host : "");
+	{
+		/* Phase 2.5: best-effort, log-only. Never written back into the message -- see
+		 * dea_pseudonym.c and extensions/app_dea/README for why the real value stays on
+		 * the wire (the external partner needs it). */
+		char * sub_token = NULL;
+		if (dea_conf->pseudonymize_subscriber_id) {
+			CHECK_FCT( dea_pseudonymize_subscriber_id(*msg, &sub_token) );
+		}
+		TRACE_DEBUG(FULL, "app_dea: topology-hid a request%s%s%s towards an external realm (real Origin-Host was '%.*s')",
+			sub_token ? " for subscriber [" : "", sub_token ? sub_token : "", sub_token ? "]" : "",
+			(int)pmd->orig_origin_host_len, pmd->orig_origin_host ? (char *)pmd->orig_origin_host : "");
+		if (sub_token)
+			free(sub_token);
+	}
 
 	return 0;
 }

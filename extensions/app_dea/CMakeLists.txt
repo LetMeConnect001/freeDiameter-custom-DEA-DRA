@@ -14,12 +14,20 @@ SET( APP_DEA_SRC
 	dea_conf.tab.c
 	dea_conf.tab.h
 	dea_hiding.c
+	dea_pseudonym.c
+	dea_policy.c
+	dea_stats.c
 )
 
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})
+INCLUDE_DIRECTORIES(${GNUTLS_INCLUDE_DIR})
 
 # Compile these files as a freeDiameter extension
 FD_ADD_EXTENSION(app_dea ${APP_DEA_SRC})
+
+# Phase 2.5 (dea_pseudonym.c) uses GnuTLS's AEAD interface directly (AES-256-SIV) for
+# deterministic, reversible subscriber-identifier pseudonymization in our own logs.
+TARGET_LINK_LIBRARIES(app_dea ${GNUTLS_LIBRARIES})
 
 
 ####

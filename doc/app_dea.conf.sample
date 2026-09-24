@@ -13,8 +13,7 @@
 # PCRF, ...).
 #
 # See extensions/app_dea/README for the full architecture and the roadmap of
-# features not yet implemented (Session-Id pseudonymization, IMSI/subscriber
-# identity mapping, fraud-detection rules, high-availability, observability).
+# features not yet implemented (high-availability, observability).
 
 # Lines starting with # are comments and ignored.
 # Spaces and newlines are not meaningful, except inside quoted areas.
@@ -64,5 +63,72 @@ internal_realm = "epc.mnc001.mcc001.3gppnetwork.org";
 # simply get a brand new masked pseudonym (not an error, just a fresh mapping). Default: 86400
 # (24h). Only meaningful if hide_session_id is enabled.
 #session_id_lifetime = 86400;
+
+## pseudonymize_subscriber_id
+# Enable/disable subscriber-identifier pseudonymization in THIS EXTENSION'S OWN LOG OUTPUT only.
+# The real IMSI (via Subscription-Id, RFC 4006) or User-Name is NEVER modified on the wire --
+# the external partner legitimately needs it (to authenticate the subscriber, fetch subscription
+# data, ...); masking it there would break roaming, unlike Origin-Host/Route-Record/Session-Id
+# above. This only affects what app_dea itself writes to its own debug log lines: instead of the
+# raw identifier, a deterministic AES-256-SIV token is logged, so multiple log lines about the
+# same subscriber stay correlatable for debugging without ever printing PII in the log file.
+#
+# Default: 0 (DISABLED). Requires imsi_pseudonym_key to be set below.
+#pseudonymize_subscriber_id = 0;
+
+## imsi_pseudonym_key
+# Secret key for pseudonymize_subscriber_id, as exactly 128 hexadecimal characters (64 bytes,
+# an AES-256-SIV key per RFC 5297). Generate one with, e.g.:
+#   openssl rand -hex 64
+# KEEP THIS SECRET: whoever holds it can recover real subscriber identifiers from the logged
+# tokens using the offline extensions/app_dea/tools/dea_imsi_reveal.c tool (see its header
+# comment). Do not commit a real key to version control; this sample uses an all-zero
+# placeholder that must be replaced.
+#imsi_pseudonym_key = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+
+## fraud_check_realm_consistency
+# Enable/disable a fraud check on every request received from an external peer: the message's
+# Origin-Realm AVP is compared against the realm that peer actually presented during CER/CEA
+# (peer identity is authenticated at the connection level -- see peer_hdr.info.runtime.pir_realm).
+# A mismatch means someone is using an established connection to claim a realm that was never
+# negotiated for it -- a classic roaming spoofing/impersonation pattern.
+#
+# Default: 0 (DISABLED). See fraud_reject_on_mismatch below for what happens on a violation.
+#fraud_check_realm_consistency = 0;
+
+## fraud_reject_on_mismatch
+# What to do when fraud_check_realm_consistency detects a mismatch.
+# 0 (default): log only (fd_log_error, always visible, not gated behind FULL tracing). Use this
+#   first in any network you are not 100% familiar with, to see what the check would have done
+#   without risking legitimate traffic.
+# 1: also reject the request (DIAMETER_AUTHORIZATION_REJECTED).
+#fraud_reject_on_mismatch = 0;
+
+## interconnect_realm
+# Declare a per-realm Application-Id allow-list for interconnect. Format:
+#   interconnect_realm = "<realm>" : <app-id> [<app-id> ...];
+# A request received from an external peer (see internal_realm above) whose Origin-Realm matches
+# "<realm>" must carry one of the listed Application-Id values (from the message header, e.g.
+# 16777251 for 3GPP S6a/S6d, 16777238 for 3GPP Gx -- see your dictionaries/3GPP specs for the
+# values relevant to your interconnects), or it is rejected.
+#
+# IMPORTANT -- default-deny once active: as soon as at least one interconnect_realm directive is
+# present, ANY external realm with no matching rule at all is also rejected (not silently let
+# through). This matches real interconnect practice: you only accept traffic from partners you
+# have an explicit, configured agreement with. Leave this directive out entirely if you do not
+# want Application-Id enforcement.
+#interconnect_realm = "partner-a.net" : 16777251 16777238;
+#interconnect_realm = "partner-b.net" : 16777251;
+
+## stats_interval
+# How often (in seconds) app_dea dumps its operational counters to the log (requests seen,
+# topology-masked, Session-Id pairings minted/reused, subscriber-pseudonymization performed,
+# interconnect allow/reject counts, fraud mismatches). These are bare integer counts, never any
+# AVP value or identity -- safe to expose at any log level. A dump can also be triggered on
+# demand at any time by sending SIGUSR2 to the daemon (shared with the dbg_monitor extension's
+# own status dump, if loaded).
+#
+# Default: 300 (5 min). Set to 0 to disable the periodic dump (SIGUSR2 still works).
+#stats_interval = 300;
 
 #########################################################################################

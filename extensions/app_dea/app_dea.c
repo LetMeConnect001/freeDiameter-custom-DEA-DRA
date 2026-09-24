@@ -13,6 +13,10 @@ struct dict_object * dea_avp_origin_realm = NULL;
 struct dict_object * dea_avp_destination_realm = NULL;
 struct dict_object * dea_avp_route_record = NULL;
 struct dict_object * dea_avp_session_id = NULL;
+struct dict_object * dea_avp_user_name = NULL;
+struct dict_object * dea_avp_subscription_id = NULL;
+struct dict_object * dea_avp_subscription_id_type = NULL;
+struct dict_object * dea_avp_subscription_id_data = NULL;
 
 static struct fd_rt_fwd_hdl * dea_fwd_req_hdl = NULL;
 static struct fd_rt_fwd_hdl * dea_fwd_ans_hdl = NULL;
@@ -62,6 +66,18 @@ static int dea_entry(char * conffile)
 	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Destination-Realm", &dea_avp_destination_realm, ENOENT) );
 	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Route-Record", &dea_avp_route_record, ENOENT) );
 	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Session-Id", &dea_avp_session_id, ENOENT) );
+	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "User-Name", &dea_avp_user_name, ENOENT) );
+
+	/* Phase 2.5: these come from RFC 4006 (dict_dcca), which may not be loaded -- resolve them
+	 * best-effort (retval=0: leaves the pointer NULL instead of failing extension load). */
+	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Subscription-Id", &dea_avp_subscription_id, 0) );
+	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Subscription-Id-Type", &dea_avp_subscription_id_type, 0) );
+	CHECK_FCT( fd_dict_search( fd_g_config->cnf_dict, DICT_AVP, AVP_BY_NAME, "Subscription-Id-Data", &dea_avp_subscription_id_data, 0) );
+	if (dea_conf->pseudonymize_subscriber_id && !dea_avp_subscription_id) {
+		fd_log_notice("app_dea: pseudonymize_subscriber_id is enabled but the Subscription-Id AVP "
+			"(RFC 4006) is not in the dictionary -- load the dict_dcca extension before app_dea "
+			"if you need IMSI pseudonymization; falling back to User-Name only for now.");
+	}
 
 	/* Reserve a per-message data slot to carry the real identity of a topology-hidden
 	 * request over to its matching answer (see dea_hiding.c) */
@@ -77,11 +93,16 @@ static int dea_entry(char * conffile)
 	CHECK_FCT( fd_rt_fwd_register( dea_fwd_req, NULL, RT_FWD_REQ, &dea_fwd_req_hdl ) );
 	CHECK_FCT( fd_rt_fwd_register( dea_fwd_ans, NULL, RT_FWD_ANS, &dea_fwd_ans_hdl ) );
 
-	fd_log_notice("app_dea: extension loaded (identity='%s', hide_origin_host=%s, hide_route_record=%s, hide_session_id=%s)",
+	/* Phase 4: start the operational counters dump (periodic thread + SIGUSR2 handler) */
+	CHECK_FCT( dea_stats_init() );
+
+	fd_log_notice("app_dea: extension loaded (identity='%s', hide_origin_host=%s, hide_route_record=%s, hide_session_id=%s, pseudonymize_subscriber_id=%s, fraud_check_realm_consistency=%s)",
 		dea_conf->hidden_id ? (char *)dea_conf->hidden_id : "(not set)",
 		dea_conf->hide_origin_host ? "on" : "off",
 		dea_conf->hide_route_record ? "on" : "off",
-		dea_conf->hide_session_id ? "on" : "off");
+		dea_conf->hide_session_id ? "on" : "off",
+		dea_conf->pseudonymize_subscriber_id ? "on" : "off",
+		dea_conf->fraud_check_realm_consistency ? "on" : "off");
 
 	return 0;
 }
@@ -90,6 +111,8 @@ static int dea_entry(char * conffile)
 void fd_ext_fini(void)
 {
 	TRACE_ENTRY();
+
+	dea_stats_fini();
 
 	if (dea_fwd_req_hdl) {
 		CHECK_FCT_DO( fd_rt_fwd_unregister(dea_fwd_req_hdl, NULL), );
@@ -109,6 +132,20 @@ void fd_ext_fini(void)
 		free(r->name);
 		free(r);
 	}
+
+	/* Destroy the interconnect rules list */
+	while (!FD_IS_LIST_EMPTY(&dea_conf->interconnect_rules)) {
+		struct dea_interconnect_rule * r = dea_conf->interconnect_rules.next->o;
+		fd_list_unlink(&r->chain);
+		while (!FD_IS_LIST_EMPTY(&r->allowed_apps)) {
+			struct dea_app_id * a = r->allowed_apps.next->o;
+			fd_list_unlink(&a->chain);
+			free(a);
+		}
+		free(r->realm);
+		free(r);
+	}
+
 	if (dea_conf->hidden_id) {
 		free(dea_conf->hidden_id);
 		dea_conf->hidden_id = NULL;

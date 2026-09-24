@@ -29,8 +29,20 @@ static struct dea_config local_conf = {
 	.hide_origin_host = 1,
 	.hide_route_record = 1,
 	.hide_session_id = 0,		/* opt-in: deviates from RFC 6733 relay behavior, see README */
-	.session_id_lifetime = 86400	/* 24h of inactivity before a Session-Id pairing expires */
+	.session_id_lifetime = 86400,	/* 24h of inactivity before a Session-Id pairing expires */
+	.pseudonymize_subscriber_id = 0, /* opt-in: needs imsi_pseudonym_key, see README */
+	.imsi_pseudonym_key = {0},
+	.imsi_pseudonym_key_set = 0,
+	.interconnect_rules = FD_LIST_INITIALIZER(local_conf.interconnect_rules),
+	.fraud_check_realm_consistency = 0,	/* opt-in */
+	.fraud_reject_on_mismatch = 0,		/* log-only by default, see README */
+	.stats_interval = 300			/* 5 min */
 };
+
+/* Temporary list used while parsing an interconnect_realm rule's Application-Id list, moved
+ * into the new struct dea_interconnect_rule once the rule is complete (same pattern as
+ * app_redirect's temp_list_criteria/temp_list_target in ard_conf.y). */
+static struct fd_list temp_list_appids = FD_LIST_INITIALIZER(temp_list_appids);
 struct dea_config * dea_conf = &local_conf;
 
 /* Dump the configuration */
@@ -46,10 +58,25 @@ static void dea_conf_dump(void)
 	fd_log_debug("   hide_route_record  : %s", dea_conf->hide_route_record ? "yes" : "no");
 	fd_log_debug("   hide_session_id    : %s", dea_conf->hide_session_id ? "yes" : "no");
 	fd_log_debug("   session_id_lifetime: %u sec", dea_conf->session_id_lifetime);
+	fd_log_debug("   pseudonymize_subscriber_id : %s", dea_conf->pseudonymize_subscriber_id ? "yes" : "no");
+	fd_log_debug("   imsi_pseudonym_key : %s", dea_conf->imsi_pseudonym_key_set ? "(configured, not shown)" : "(not set)");
+	fd_log_debug("   fraud_check_realm_consistency : %s", dea_conf->fraud_check_realm_consistency ? "yes" : "no");
+	fd_log_debug("   fraud_reject_on_mismatch : %s", dea_conf->fraud_reject_on_mismatch ? "yes" : "no (log only)");
+	fd_log_debug("   stats_interval : %u sec%s", dea_conf->stats_interval, dea_conf->stats_interval ? "" : " (periodic dump disabled)");
 	fd_log_debug("   internal realms:");
 	for (li = dea_conf->internal_realms.next; li != &dea_conf->internal_realms; li = li->next) {
 		struct dea_realm * r = li->o;
 		fd_log_debug("     - %.*s", (int)r->len, r->name);
+	}
+	fd_log_debug("   interconnect rules:");
+	for (li = dea_conf->interconnect_rules.next; li != &dea_conf->interconnect_rules; li = li->next) {
+		struct dea_interconnect_rule * r = li->o;
+		struct fd_list * li2;
+		fd_log_debug("     - realm '%.*s', allowed Application-Id:", (int)r->realmlen, r->realm);
+		for (li2 = r->allowed_apps.next; li2 != &r->allowed_apps; li2 = li2->next) {
+			struct dea_app_id * a = li2->o;
+			fd_log_debug("         %u", a->id);
+		}
 	}
 	fd_log_debug("app_dea: end of configuration dump");
 }
@@ -84,6 +111,10 @@ int dea_conf_handle(char * conffile)
 		fd_log_notice("app_dea: no 'hidden_identity' configured -- topology hiding is DISABLED, the extension will only pass messages through.");
 	} else if (FD_IS_LIST_EMPTY(&dea_conf->internal_realms)) {
 		fd_log_notice("app_dea: 'hidden_identity' is set but no 'internal_realm' configured -- topology hiding will never trigger.");
+	}
+
+	if (dea_conf->pseudonymize_subscriber_id && !dea_conf->imsi_pseudonym_key_set) {
+		fd_log_notice("app_dea: 'pseudonymize_subscriber_id' is enabled but no 'imsi_pseudonym_key' is configured -- subscriber pseudonymization will never trigger.");
 	}
 
 	dea_conf_dump();
@@ -132,6 +163,12 @@ void yyerror (YYLTYPE *ploc, char * conffile, char const *s)
 %token 		TOK_HIDE_ROUTE_RECORD
 %token 		TOK_HIDE_SESSION_ID
 %token 		TOK_SESSION_ID_LIFETIME
+%token 		TOK_PSEUDONYMIZE_SUBSCRIBER_ID
+%token 		TOK_IMSI_PSEUDONYM_KEY
+%token 		TOK_INTERCONNECT_REALM
+%token 		TOK_FRAUD_CHECK_REALM_CONSISTENCY
+%token 		TOK_FRAUD_REJECT_ON_MISMATCH
+%token 		TOK_STATS_INTERVAL
 
 
 /* -------------------------------------- */
@@ -192,6 +229,84 @@ directive:		TOK_HIDDEN_IDENTITY '=' TOK_QSTRING ';'
 			TOK_SESSION_ID_LIFETIME '=' TOK_U32VAL ';'
 			{
 				dea_conf->session_id_lifetime = $3;
+			}
+			|
+			TOK_PSEUDONYMIZE_SUBSCRIBER_ID '=' TOK_U32VAL ';'
+			{
+				dea_conf->pseudonymize_subscriber_id = $3 ? 1 : 0;
+			}
+			|
+			TOK_IMSI_PSEUDONYM_KEY '=' TOK_QSTRING ';'
+			{
+				size_t i;
+				if (strlen($3) != 128) {
+					free($3);
+					yyerror (&yylloc, conffile, "imsi_pseudonym_key must be exactly 128 hexadecimal characters (64 bytes for AES-256-SIV).");
+					YYERROR;
+				}
+				for (i = 0; i < 64; i++) {
+					unsigned int byte;
+					if (sscanf($3 + i*2, "%2x", &byte) != 1) {
+						free($3);
+						yyerror (&yylloc, conffile, "imsi_pseudonym_key must contain only hexadecimal characters.");
+						YYERROR;
+					}
+					dea_conf->imsi_pseudonym_key[i] = (uint8_t) byte;
+				}
+				dea_conf->imsi_pseudonym_key_set = 1;
+				free($3);
+			}
+			|
+			TOK_FRAUD_CHECK_REALM_CONSISTENCY '=' TOK_U32VAL ';'
+			{
+				dea_conf->fraud_check_realm_consistency = $3 ? 1 : 0;
+			}
+			|
+			TOK_FRAUD_REJECT_ON_MISMATCH '=' TOK_U32VAL ';'
+			{
+				dea_conf->fraud_reject_on_mismatch = $3 ? 1 : 0;
+			}
+			|
+			TOK_STATS_INTERVAL '=' TOK_U32VAL ';'
+			{
+				dea_conf->stats_interval = $3;
+			}
+			|
+			TOK_INTERCONNECT_REALM '=' TOK_QSTRING ':' app_id_list ';'
+			{
+				struct dea_interconnect_rule * r;
+				CHECK_MALLOC_DO( r = malloc(sizeof(struct dea_interconnect_rule)),
+					{
+						free($3);
+						yyerror (&yylloc, conffile, "Error while allocating new memory...");
+						YYERROR;
+					} );
+				memset(r, 0, sizeof(struct dea_interconnect_rule));
+				fd_list_init(&r->chain, r);
+				r->realm = (os0_t) $3;
+				r->realmlen = strlen($3);
+				fd_list_init(&r->allowed_apps, NULL);
+				fd_list_move_end(&r->allowed_apps, &temp_list_appids);
+				fd_list_insert_before(&dea_conf->interconnect_rules, &r->chain);
+			}
+			;
+
+app_id_list:		/* This list cannot be empty */
+			app_id_item
+			| app_id_list app_id_item
+			;
+
+app_id_item:		TOK_U32VAL
+			{
+				struct dea_app_id * a;
+				CHECK_MALLOC_DO( a = malloc(sizeof(struct dea_app_id)),
+					{
+						yyerror (&yylloc, conffile, "Error while allocating new memory...");
+						YYERROR;
+					} );
+				a->id = $1;
+				fd_list_init(&a->chain, a);
+				fd_list_insert_before(&temp_list_appids, &a->chain);
 			}
 			;
 

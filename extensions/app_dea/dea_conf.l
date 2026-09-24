@@ -71,6 +71,12 @@ qstring		\"[^\"\n]*\"
 (?i:"hide_route_record")	{ return TOK_HIDE_ROUTE_RECORD;	}
 (?i:"hide_session_id")		{ return TOK_HIDE_SESSION_ID;		}
 (?i:"session_id_lifetime")	{ return TOK_SESSION_ID_LIFETIME;	}
+(?i:"pseudonymize_subscriber_id")	{ return TOK_PSEUDONYMIZE_SUBSCRIBER_ID;	}
+(?i:"imsi_pseudonym_key")	{ return TOK_IMSI_PSEUDONYM_KEY;	}
+(?i:"interconnect_realm")	{ return TOK_INTERCONNECT_REALM;	}
+(?i:"fraud_check_realm_consistency")	{ return TOK_FRAUD_CHECK_REALM_CONSISTENCY;	}
+(?i:"fraud_reject_on_mismatch")	{ return TOK_FRAUD_REJECT_ON_MISMATCH;	}
+(?i:"stats_interval")		{ return TOK_STATS_INTERVAL;		}
 
 	/* Valid single characters for yyparse */
 [:=;]		{ return yytext[0]; }

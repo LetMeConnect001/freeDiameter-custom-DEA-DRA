@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rt_rewrite Rule Manager</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+	<h1>Règles AVP (rt_rewrite)</h1>
+	<button id="applyBtn" class="btn-primary">Appliquer et recharger</button>
+</header>
+
+<div id="statusBar" class="status-bar" hidden></div>
+
+<main>
+	<section id="ruleListSection">
+		<h2>Règles</h2>
+		<table id="ruleTable">
+			<thead>
+				<tr>
+					<th></th>
+					<th>Nom</th>
+					<th>Type</th>
+					<th>Détail</th>
+					<th>Condition</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody id="ruleTableBody"></tbody>
+		</table>
+		<button id="newRuleBtn" class="btn-secondary">+ Nouvelle règle</button>
+	</section>
+
+	<section id="formSection" hidden>
+		<h2 id="formTitle">Nouvelle règle</h2>
+		<form id="ruleForm">
+			<label>
+				Nom (libellé, pas utilisé dans la config)
+				<input type="text" id="f_name" required placeholder="ex: IMSI vendor vers standard">
+			</label>
+
+			<label>
+				Type d'opération
+				<select id="f_type">
+					<option value="move">Déplacer / Renommer (MAP)</option>
+					<option value="delete">Supprimer (DROP)</option>
+					<option value="add">Ajouter (ADD)</option>
+				</select>
+			</label>
+
+			<div id="fields_move" class="type-fields">
+				<label>
+					AVP source (séparer par " : " si imbriqué dans un Grouped-AVP)
+					<input type="text" id="f_source_move" placeholder='ex: 3GPP-IMSI'>
+				</label>
+				<label>
+					AVP destination
+					<input type="text" id="f_dest_move" placeholder='ex: Subscription-Id : Subscription-Id-Data'>
+				</label>
+			</div>
+
+			<div id="fields_delete" class="type-fields" hidden>
+				<label>
+					AVP à supprimer
+					<input type="text" id="f_source_delete" placeholder='ex: Proxy-Info : Proxy-Host'>
+				</label>
+			</div>
+
+			<div id="fields_add" class="type-fields" hidden>
+				<label>
+					Type de message concerné (command)
+					<input type="text" id="f_command" placeholder='ex: Credit-Control-Request'>
+				</label>
+				<label>
+					AVP à ajouter
+					<input type="text" id="f_dest_add" placeholder='ex: Subscription-Id : Subscription-Id-Type'>
+				</label>
+				<label>
+					Valeur fixe
+					<input type="text" id="f_value" placeholder='ex: 1'>
+				</label>
+			</div>
+
+			<fieldset>
+				<legend>
+					<label>
+						<input type="checkbox" id="f_hasCondition">
+						Condition (n'appliquer que si...)
+					</label>
+				</legend>
+				<div id="conditionFields" hidden>
+					<label>
+						AVP à comparer
+						<input type="text" id="f_cond_avp" placeholder='ex: Service-Information : IMS-Information : Role-Of-Node'>
+					</label>
+					<label>
+						Opérateur
+						<select id="f_cond_op">
+							<option value="=">= (égal)</option>
+							<option value="<">&lt;</option>
+							<option value="<=">&lt;=</option>
+							<option value=">=">&gt;=</option>
+							<option value=">">&gt;</option>
+						</select>
+					</label>
+					<label>
+						Valeur de comparaison
+						<input type="text" id="f_cond_value" placeholder="ex: 10">
+					</label>
+				</div>
+			</fieldset>
+
+			<label class="checkbox-row">
+				<input type="checkbox" id="f_enabled" checked>
+				Règle active
+			</label>
+
+			<div class="form-actions">
+				<button type="submit" class="btn-primary">Enregistrer</button>
+				<button type="button" id="cancelBtn" class="btn-secondary">Annuler</button>
+			</div>
+		</form>
+	</section>
+
+	<section id="previewSection">
+		<h2>Aperçu de la config générée</h2>
+		<pre id="previewText">(chargement...)</pre>
+	</section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

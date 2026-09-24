@@ -138,40 +138,120 @@ consistently rewritten between the real and masked value.
   (see Phase 3 fraud detection).
 
 
-Phase 2.5 -- Subscriber identity privacy (not started)
-------------------------------------------------------------
+Phase 2.5 -- Subscriber identifier pseudonymization -- IMPLEMENTED (opt-in)
+------------------------------------------------------------------------------
 
-- **Reversible pseudonym scheme for HSS/MME/subscriber identity**: IMSI and
-  other subscriber identifiers appearing in AVPs (e.g. User-Name,
-  Subscription-Id) are not topology per se but are similarly sensitive
-  across a roaming boundary in some deployments. Needs a policy decision
-  (which AVPs, which direction) before implementation -- flagged here, not
-  designed yet. Could reuse the same `fd_sess_*`-backed pairing mechanism
-  built for Session-Id in Phase 2, or a dedicated store if the lifetime/scope
-  needed differs (e.g. a pseudonym stable across sessions, not per-session).
-- **IMSI/HSS/MME stateful mapping store leakage risks**: whatever store
-  backs the above must itself not become a new leakage point (access
-  control, at-rest protection, bounded TTL, no cross-tenant bleed in a
-  multi-tenant deployment).
+**Scope, clarified with the operator before implementation**: unlike
+Origin-Host/Route-Record/Session-Id, a subscriber identifier (IMSI, User-Name)
+is NOT masked on the wire towards the external partner -- the partner
+legitimately needs the real value to authenticate the subscriber and fetch
+subscription data; masking it there would simply break roaming. The actual
+need identified was narrower and different: app_dea's own debug logs can
+contain PII (compliance concern), but a naive one-way redaction (e.g. hashing
+or blanking it) would make debugging a real incident harder (can no longer
+tell "these five log lines are about the same subscriber", let alone recover
+who it was). So Phase 2.5 is a **log-output-only** feature: it never touches
+any AVP, never changes what is sent to any peer.
+
+- **What it does**: `dea_pseudonymize_subscriber_id()` (`dea_pseudonym.c`)
+  extracts the subscriber identifier from the (possibly repeated)
+  `Subscription-Id` grouped AVP -- the entry whose `Subscription-Id-Type` is
+  `END_USER_IMSI` (RFC 4006) -- falling back to `User-Name` if absent, then
+  encrypts it with **AES-256-SIV** (RFC 5297, via GnuTLS's AEAD interface,
+  `GNUTLS_CIPHER_AES_256_SIV`) under a fixed nonce and hex-encodes the
+  result. The token is spliced into the existing `dea_fwd_req` masking log
+  line (`app_dea: topology-hid a request for subscriber [<token>] ...`).
+  Nothing is written back into the message.
+- **Why AES-256-SIV specifically**: it is a *deterministic* authenticated
+  cipher -- the same key + plaintext always yields the same ciphertext
+  (verified empirically against GnuTLS 3.8.9 before writing the code: same
+  input -> same output every time; different input -> different output;
+  tampering with a token is detected on decrypt). This directly resolves the
+  debuggability-vs-compliance tension: logs stay correlatable by subscriber
+  (grep for one token across many log lines) without ever showing the raw
+  IMSI, and unlike GCM/CBC, SIV is specifically designed to tolerate the
+  fixed/reused nonce this requires (RFC 5297 SS1, "nonce-misuse resistant") --
+  reusing a nonce with GCM would be a real vulnerability; with SIV it is the
+  intended mode of use.
+- **Reversibility, deliberately kept out of the running daemon**: the
+  running app_dea process only ever encrypts, never decrypts. Recovering a
+  real identifier from a logged token requires the same 64-byte key AND a
+  separate, offline tool: `extensions/app_dea/tools/dea_imsi_reveal.c` (not
+  built by the extension's CMake, on purpose -- build and run it manually,
+  see its header comment; round-trip verified manually before shipping).
+  This keeps "can read the logs" and "can de-anonymize a subscriber" as two
+  separate privileges, restricted to whoever holds `imsi_pseudonym_key`.
+- **Graceful degradation**: `Subscription-Id`/`-Type`/`-Data` come from RFC
+  4006 (the `dict_dcca` extension), which may not be loaded; they are
+  resolved with `fd_dict_search(..., retval=0)` instead of the `ENOENT`
+  pattern used for Phase 1/2's base-protocol AVPs, so a missing dictionary
+  degrades to "fall back to User-Name" (logged once as a notice at load
+  time) rather than failing extension load.
+- **NOT done in Phase 2.5**: no attempt to pseudonymize any other PII-bearing
+  AVP (e.g. MSISDN via a different `Subscription-Id-Type`, `Public-Identity`
+  in Cx/Dx); no pseudonymization outside `dea_fwd_req`'s existing log line
+  (e.g. Phase 3's future fraud-detection audit trail would need its own call
+  to `dea_pseudonymize_subscriber_id()`); key rotation is not implemented
+  (changing `imsi_pseudonym_key` silently makes all previously logged tokens
+  unrecoverable with the new key -- expected for a stateless keyed cipher,
+  but worth knowing before rotating in production).
 
 
-Phase 3 -- Interconnect policy & fraud detection
----------------------------------------------------
+Phase 3 -- Interconnect policy & fraud detection -- IMPLEMENTED
+--------------------------------------------------------------------
 
-- **Application-Id allow-list for interconnect**: reject/drop requests
-  whose `Application-Id` (message header, see `struct msg_hdr.msg_appl`)
-  is not on a per-peer or per-realm allow-list. Natural fit for a second
-  `fd_rt_fwd_register(..., RT_FWD_REQ, ...)` callback (or a branch inside
-  `dea_fwd_req`), returning an error answer via
-  `fd_msg_new_answer_from_req` + `fd_msg_rescode_set` + `fd_msg_send` (same
-  idiom `app_redirect`/`rt_rewrite` use for in-place request -> answer
-  conversion).
-- **Fraud detection for spoofed roaming messages**: rule-based checks
-  correlating claimed Origin-Realm/Origin-Host against the actual
-  connected peer identity (`fd_msg_source_get` / `fd_peer_getbyid`) and
-  against Route-Record consistency; rate-limiting/anomaly rules per peer.
-  Needs a rule engine and a decision on false-positive handling
-  (log-only vs. reject) before implementation.
+Both checks below (`dea_policy.c`) only fire for requests whose sending
+realm is NOT one of the configured `internal_realm`(s) -- `dea_fwd_req`
+computes `from_internal` once (already needed by Phase 1/2) and gates both
+on `!from_internal`, independently of whether `hidden_id` (topology hiding)
+is even configured, so an operator can use Phase 3 on its own.
+
+- **Application-Id allow-list for interconnect, per realm** (scope decided
+  with the operator: per-partner, not a single global list, to reflect real
+  interconnect agreements which differ per partner): `interconnect_realm =
+  "<realm>" : <app-id> [<app-id> ...];` (repeatable, `dea_conf.y`/`.l`,
+  grammar modeled on `app_redirect`'s rule+target_list pattern). A request's
+  `Application-Id` comes from the message header (`struct msg_hdr.msg_appl`,
+  not an AVP) and is checked against the rule matching its `Origin-Realm`.
+  **Default-deny once active**: as soon as one `interconnect_realm` rule
+  exists, any external realm with *no* matching rule is also rejected --
+  matching real interconnect practice (only accept traffic from partners you
+  have an explicit agreement with), and avoiding the false sense of security
+  of "I configured partner A, so I assumed everyone else was blocked too"
+  when in fact unconfigured realms would otherwise sail through unrestricted.
+  Verified with a standalone test harness linking just the generated
+  parser (`dea_conf.tab.c`/`lex.dea_conf.c`) against `libfdproto`, feeding a
+  config with multiple realms/app-id lists and asserting the parsed
+  structures match (not just "bison reported no grammar conflicts").
+- **Fraud detection: Origin-Realm vs. CER/CEA-presented realm**: compares a
+  request's `Origin-Realm` AVP against `peer->info.runtime.pir_realm` --
+  "the received realm in CER/CEA" for the peer that actually sent us the
+  message (`fd_msg_source_get` + `fd_peer_getbyid`), i.e. the realm that
+  peer's *connection* was authenticated for, not just what any individual
+  message claims. A mismatch is logged at `fd_log_error` (always visible,
+  not gated behind `FULL` tracing, since this is security-relevant) and,
+  only if `fraud_reject_on_mismatch` is enabled, also rejected.
+  **Default is log-only** (`fraud_reject_on_mismatch = 0`): the operator
+  enables it explicitly once confident there are no legitimate multi-realm
+  peers or other unanticipated cases in their specific network -- avoids the
+  check breaking real traffic the first time it is turned on somewhere new.
+- **Rejection idiom**: both violations funnel through one `reject_request()`
+  helper using the same in-place request -> error-answer conversion as
+  `app_redirect`/`rt_rewrite` (`fd_msg_new_answer_from_req` +
+  `fd_msg_rescode_set` + `fd_msg_send`), always with
+  `DIAMETER_AUTHORIZATION_REJECTED` for both violation types uniformly (not
+  a more specific code like `DIAMETER_APPLICATION_UNSUPPORTED`), so a peer
+  probing the policy cannot distinguish "wrong Application-Id" from
+  "spoofed realm" from the error code alone.
+- **NOT done in Phase 3**: rate-limiting/anomaly detection per peer (the
+  original idea also included this; descoped to keep this phase to the two
+  concretely-specified, immediately actionable checks -- needs its own
+  design pass on thresholds/time windows before implementation);
+  Route-Record-based consistency checks (Phase 1 already strips/replaces
+  Route-Record on egress, so there is little left to cross-check on
+  ingress); per-peer Application-Id allow-list as a separate, finer axis
+  from per-realm (a peer could in principle serve traffic for a realm
+  different from its own -- not handled).
 - **CER/CEA / handshake fingerprint leaks**: freeDiameter's Capabilities
   Exchange (product name, firmware revision, supported
   Vendor-Id/Application-Id lists, and IP addresses in Host-IP-Address) is
@@ -185,30 +265,78 @@ Phase 3 -- Interconnect policy & fraud detection
 Phase 4 -- Operability: HA, observability, performance
 ----------------------------------------------------------
 
-- **High availability / failover**: freeDiameter's own peer/routing-out
-  scoring (`fd_rt_out_register`, `FD_SCORE_*`) already provides multi-peer
-  failover for the next hop; what's missing here is DEA-specific state
-  replication -- Phase 2's Session-Id pairings live in each instance's own
-  in-memory session store, so a failover mid-session currently loses the
-  mapping (the session gets a fresh masked pseudonym on its next message,
-  which is safe but changes the identity the external partner sees
-  mid-session) across redundant DEA instances.
-- **Metrics / privacy-aware observability**: counters and logs must not
-  themselves leak what Phase 1/2 just hid (e.g. never log the real
-  Origin-Host at a level that reaches external-facing dashboards). Natural
-  fit for `fd_hook_register` on `HOOK_MESSAGE_ROUTING_FORWARD` /
-  `HOOK_MESSAGE_SENT` / `HOOK_MESSAGE_RECEIVED` (read-only hooks, see
-  `dbg_msg_timings` for the pattern) feeding metrics rather than rewriting.
-- **Throttling**: per-peer / per-realm rate limiting, likely alongside the
-  fraud-detection rule engine (Phase 3).
-- **Testing**: fuzzing the config parser and the AVP-rewrite paths
-  (malformed/oversized AVPs, repeated Route-Record floods, missing
-  mandatory AVPs), plus dictionary coverage checks so masking rules don't
-  silently no-op when a dictionary extension isn't loaded.
-- **Performance targets**: not yet defined; needs a number (msgs/sec,
-  p99 added latency) from whoever owns the deployment before it can drive
-  design choices -- Phase 2's single global `dea_sid_lock` (see above) is
-  the first thing to revisit if a target requires it.
+### Observability -- IMPLEMENTED
+
+`dea_stats.c` adds privacy-aware operational counters: bare integer counts
+of event categories (`DEA_STAT_*` in app_dea.h -- requests seen, external
+requests, topology-masked, Session-Id minted/reused, subscriber
+pseudonymized, interconnect allowed/rejected by reason, fraud mismatches
+detected/rejected), never any AVP value or identity, so the dump is safe to
+route to any log level or downstream pipeline without re-introducing the
+leakage Phase 1/2/2.5 were built to prevent.
+
+- **Mechanism**: follows `dbg_monitor`'s established pattern exactly (same
+  extension already in this codebase, same primitives): a background thread
+  dumps counters every `stats_interval` seconds (config, default 300s; 0
+  disables it), and `fd_event_trig_regcb(SIGUSR2, "app_dea", ...)` triggers
+  an immediate dump on demand. SIGUSR2 is the same signal `dbg_monitor` uses
+  for its own status dump -- multiple extensions independently registering
+  the same trigger value is an established pattern in this codebase (SIGUSR1
+  alone is already shared by six other extensions), so both dumps fire
+  together if both extensions are loaded.
+- **Thread safety**: all counters live behind one `pthread_mutex_t`
+  (`dea_stats_lock`), incremented at the exact call sites in `dea_hiding.c`
+  / `dea_policy.c` / `dea_pseudonym.c` where the corresponding event already
+  happens (no separate observation layer via `fd_hook_register` was needed:
+  Phase 1/2/3's own code already sits at every point worth counting).
+  Verified empirically, not just reasoned about: a standalone test harness
+  ran 8 threads x 10,000 increments each concurrently against the real
+  `dea_stats.c` object file (linking only libfdproto + a one-function stub
+  for the sole libfdcore symbol it needs, `fd_event_trig_regcb`) and
+  asserted the final count was exactly 80,000 -- confirming zero lost
+  updates under real concurrent access, not merely "the lock looks correct
+  by inspection".
+- **NOT done here**: no per-realm/per-peer breakdown of any counter (all
+  global process-wide totals); no reset-to-zero capability (counters are
+  monotonic for the life of the process); no export format other than the
+  log line dump (e.g. no Prometheus/statsd integration) -- see "Performance
+  targets" below for why a specific export format isn't picked yet.
+
+### High availability / failover -- NOT STARTED
+
+freeDiameter's own peer/routing-out scoring (`fd_rt_out_register`,
+`FD_SCORE_*`) already provides multi-peer failover for the next hop; what's
+missing here is DEA-specific state replication -- Phase 2's Session-Id
+pairings live in each instance's own in-memory session store, so a failover
+mid-session currently loses the mapping (the session gets a fresh masked
+pseudonym on its next message, which is safe but changes the identity the
+external partner sees mid-session) across redundant DEA instances. Needs a
+decision on a shared backend (e.g. Redis, a SQL database like `app_acct`'s
+`acct_db.c` already depends on for a different purpose) before
+implementation -- a real architecture decision, not started.
+
+### Throttling -- NOT STARTED
+
+Per-peer / per-realm rate limiting -- the rate-limiting / anomaly-detection
+half of the original Phase 3 idea, descoped from Phase 3 itself (see there)
+since it needs its own design pass on thresholds and time windows, same as
+Phase 3's fraud check needed a log-vs-reject decision before implementation.
+
+### Testing -- NOT STARTED
+
+Fuzzing the config parser and the AVP-rewrite paths (malformed/oversized
+AVPs, repeated Route-Record floods, missing mandatory AVPs), plus dictionary
+coverage checks so masking rules don't silently no-op when a dictionary
+extension isn't loaded. Different in kind from the other Phase 4 items (a
+QA activity, not a runtime feature).
+
+### Performance targets -- BLOCKED
+
+Not yet defined; needs a number (msgs/sec, p99 added latency) from whoever
+owns the deployment before it can drive design choices -- Phase 2's single
+global `dea_sid_lock` (see above) is the first thing to revisit if a target
+requires it, and it's also what would decide whether Observability's
+counters need a lower-overhead export path than periodic log lines.
 
 
 Known limitations of the current code
@@ -229,3 +357,15 @@ Known limitations of the current code
 - `dea_fwd_ans` handles Session-Id un/re-masking but otherwise only logs for
   Origin-Host/Route-Record; it is the intended integration point for
   Phase 3 features that need to act further on the answer path.
+- Phase 2.5's subscriber pseudonymization is wired into exactly one log line
+  (`dea_fwd_req`'s masking path); any future logging that touches subscriber
+  identity (e.g. a Phase 3 fraud-detection audit trail) needs its own call
+  to `dea_pseudonymize_subscriber_id()`, it is not automatic.
+- `imsi_pseudonym_key` has no rotation support: it is one static key for the
+  life of the process, read once at config parse time.
+- Phase 3's interconnect allow-list is per-realm, not per-peer: a peer
+  serving traffic for a realm different from its own is not distinguished.
+- Phase 3's fraud check only compares Origin-Realm against the sending
+  peer's CER/CEA realm; it does not rate-limit, does not build any anomaly
+  baseline over time, and does not look at any AVP besides Origin-Realm
+  (e.g. Origin-Host is not cross-checked against the peer's Diameter-Id).
