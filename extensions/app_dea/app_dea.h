@@ -46,6 +46,21 @@
  * any log level. Dumped periodically (configurable interval) and on
  * SIGUSR2, following the same pattern as the dbg_monitor extension.
  *
+ * Phase 4 also adds peer visibility + live add, two independent mechanisms:
+ *  - DISCOVERY (dea_peer_mgmt.c): registers a fd_peer_validate_register()
+ *    callback that fires for every CER from a peer not already configured.
+ *    It records the candidate's Diameter-Id/Realm and ALWAYS returns
+ *    *auth = 0 (undecided) -- this changes NOTHING about whether the
+ *    connection is accepted; freeDiameter's own default (reject unknown
+ *    peers) still applies exactly as before. Purely observing, written to
+ *    discovered_peers_file for an external tool (e.g. the webui) to read.
+ *  - LIVE ADD (dea_peer_mgmt.c): on SIGUSR2 (shared with the stats dump
+ *    above), if pending_peer_add_file exists, each entry is turned into a
+ *    fd_peer_add() call -- the same runtime API ("the peer is added",
+ *    libfdcore.h) freeDiameter's own config-parsing path uses internally,
+ *    connecting the peer WITHOUT a daemon restart.
+ * Both are opt-in (unset path = feature disabled) and off by default.
+ *
  * See doc/app_dea.conf.sample for the configuration file format, and
  * extensions/app_dea/README for the architecture and the roadmap of the
  * remaining DEA/DRA features (high-availability, throttling, ...).
@@ -76,6 +91,9 @@ struct dea_config {
 	int		fraud_reject_on_mismatch;	/* 0 (default): log only. 1: also reject the message. */
 
 	uint32_t	stats_interval;	/* seconds between periodic counter dumps (default: 300). 0 disables the periodic dump (SIGUSR2 still works). */
+
+	os0_t		discovered_peers_file;	/* where to write discovered-but-unconfigured peer candidates (JSON). NULL = discovery disabled. */
+	os0_t		pending_peer_add_file;	/* read on SIGUSR2: peers to fd_peer_add() live. NULL = live-add disabled. */
 };
 extern struct dea_config * dea_conf;
 
@@ -206,3 +224,15 @@ void dea_stats_dump(void);
 int dea_stats_init(void);
 /* Stops the periodic dump thread, if running. Call from fd_ext_fini. */
 void dea_stats_fini(void);
+
+/* Phase 4 (dea_peer_mgmt.c): peer visibility + live add, see the file header comment above for
+ * the split between DISCOVERY (read-only) and LIVE ADD (real effect). */
+
+/* Registers the fd_peer_validate_register() discovery callback (no-op if
+ * dea_conf->discovered_peers_file is unset). Call once from the extension entry point. */
+int dea_peer_mgmt_init(void);
+
+/* SIGUSR2 handler: processes dea_conf->pending_peer_add_file if set and present. Registered
+ * alongside dea_stats.c's own SIGUSR2 handler -- multiple independent handlers on the same
+ * signal is an established pattern in this codebase (see dea_stats.c's own module comment). */
+void dea_peer_mgmt_sig(void);

@@ -17,6 +17,7 @@ SET( APP_DEA_SRC
 	dea_pseudonym.c
 	dea_policy.c
 	dea_stats.c
+	dea_peer_mgmt.c
 )
 
 INCLUDE_DIRECTORIES(${CMAKE_CURRENT_BINARY_DIR})

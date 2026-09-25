@@ -4,6 +4,7 @@
  */
 
 #include "app_dea.h"
+#include <signal.h>
 
 struct fd_hook_data_hdl * dea_hook_hdl = NULL;
 struct session_handler * dea_sid_hdl = NULL;
@@ -96,13 +97,21 @@ static int dea_entry(char * conffile)
 	/* Phase 4: start the operational counters dump (periodic thread + SIGUSR2 handler) */
 	CHECK_FCT( dea_stats_init() );
 
-	fd_log_notice("app_dea: extension loaded (identity='%s', hide_origin_host=%s, hide_route_record=%s, hide_session_id=%s, pseudonymize_subscriber_id=%s, fraud_check_realm_consistency=%s)",
+	/* Phase 4: peer discovery (fd_peer_validate_register, no-op if discovered_peers_file unset)
+	 * and live peer add (dea_peer_mgmt_sig, on the same SIGUSR2 as dea_stats_init above --
+	 * multiple independent handlers per signal is an established pattern, see dea_stats.c). */
+	CHECK_FCT( dea_peer_mgmt_init() );
+	CHECK_FCT( fd_event_trig_regcb(SIGUSR2, "app_dea/peers", dea_peer_mgmt_sig) );
+
+	fd_log_notice("app_dea: extension loaded (identity='%s', hide_origin_host=%s, hide_route_record=%s, hide_session_id=%s, pseudonymize_subscriber_id=%s, fraud_check_realm_consistency=%s, peer_discovery=%s, live_peer_add=%s)",
 		dea_conf->hidden_id ? (char *)dea_conf->hidden_id : "(not set)",
 		dea_conf->hide_origin_host ? "on" : "off",
 		dea_conf->hide_route_record ? "on" : "off",
 		dea_conf->hide_session_id ? "on" : "off",
 		dea_conf->pseudonymize_subscriber_id ? "on" : "off",
-		dea_conf->fraud_check_realm_consistency ? "on" : "off");
+		dea_conf->fraud_check_realm_consistency ? "on" : "off",
+		dea_conf->discovered_peers_file ? "on" : "off",
+		dea_conf->pending_peer_add_file ? "on" : "off");
 
 	return 0;
 }
@@ -149,6 +158,14 @@ void fd_ext_fini(void)
 	if (dea_conf->hidden_id) {
 		free(dea_conf->hidden_id);
 		dea_conf->hidden_id = NULL;
+	}
+	if (dea_conf->discovered_peers_file) {
+		free(dea_conf->discovered_peers_file);
+		dea_conf->discovered_peers_file = NULL;
+	}
+	if (dea_conf->pending_peer_add_file) {
+		free(dea_conf->pending_peer_add_file);
+		dea_conf->pending_peer_add_file = NULL;
 	}
 
 	return;

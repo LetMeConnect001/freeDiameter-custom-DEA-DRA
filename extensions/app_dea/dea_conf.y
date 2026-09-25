@@ -36,7 +36,9 @@ static struct dea_config local_conf = {
 	.interconnect_rules = FD_LIST_INITIALIZER(local_conf.interconnect_rules),
 	.fraud_check_realm_consistency = 0,	/* opt-in */
 	.fraud_reject_on_mismatch = 0,		/* log-only by default, see README */
-	.stats_interval = 300			/* 5 min */
+	.stats_interval = 300,			/* 5 min */
+	.discovered_peers_file = NULL,		/* opt-in: peer discovery disabled unless set */
+	.pending_peer_add_file = NULL		/* opt-in: live peer add disabled unless set */
 };
 
 /* Temporary list used while parsing an interconnect_realm rule's Application-Id list, moved
@@ -63,6 +65,8 @@ static void dea_conf_dump(void)
 	fd_log_debug("   fraud_check_realm_consistency : %s", dea_conf->fraud_check_realm_consistency ? "yes" : "no");
 	fd_log_debug("   fraud_reject_on_mismatch : %s", dea_conf->fraud_reject_on_mismatch ? "yes" : "no (log only)");
 	fd_log_debug("   stats_interval : %u sec%s", dea_conf->stats_interval, dea_conf->stats_interval ? "" : " (periodic dump disabled)");
+	fd_log_debug("   discovered_peers_file : %s", dea_conf->discovered_peers_file ? (char *)dea_conf->discovered_peers_file : "(not set -- discovery disabled)");
+	fd_log_debug("   pending_peer_add_file : %s", dea_conf->pending_peer_add_file ? (char *)dea_conf->pending_peer_add_file : "(not set -- live add disabled)");
 	fd_log_debug("   internal realms:");
 	for (li = dea_conf->internal_realms.next; li != &dea_conf->internal_realms; li = li->next) {
 		struct dea_realm * r = li->o;
@@ -169,6 +173,8 @@ void yyerror (YYLTYPE *ploc, char * conffile, char const *s)
 %token 		TOK_FRAUD_CHECK_REALM_CONSISTENCY
 %token 		TOK_FRAUD_REJECT_ON_MISMATCH
 %token 		TOK_STATS_INTERVAL
+%token 		TOK_DISCOVERED_PEERS_FILE
+%token 		TOK_PENDING_PEER_ADD_FILE
 
 
 /* -------------------------------------- */
@@ -270,6 +276,16 @@ directive:		TOK_HIDDEN_IDENTITY '=' TOK_QSTRING ';'
 			TOK_STATS_INTERVAL '=' TOK_U32VAL ';'
 			{
 				dea_conf->stats_interval = $3;
+			}
+			|
+			TOK_DISCOVERED_PEERS_FILE '=' TOK_QSTRING ';'
+			{
+				dea_conf->discovered_peers_file = (os0_t) $3;
+			}
+			|
+			TOK_PENDING_PEER_ADD_FILE '=' TOK_QSTRING ';'
+			{
+				dea_conf->pending_peer_add_file = (os0_t) $3;
 			}
 			|
 			TOK_INTERCONNECT_REALM '=' TOK_QSTRING ':' app_id_list ';'

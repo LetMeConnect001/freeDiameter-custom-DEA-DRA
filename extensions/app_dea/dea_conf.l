@@ -77,6 +77,8 @@ qstring		\"[^\"\n]*\"
 (?i:"fraud_check_realm_consistency")	{ return TOK_FRAUD_CHECK_REALM_CONSISTENCY;	}
 (?i:"fraud_reject_on_mismatch")	{ return TOK_FRAUD_REJECT_ON_MISMATCH;	}
 (?i:"stats_interval")		{ return TOK_STATS_INTERVAL;		}
+(?i:"discovered_peers_file")	{ return TOK_DISCOVERED_PEERS_FILE;	}
+(?i:"pending_peer_add_file")	{ return TOK_PENDING_PEER_ADD_FILE;	}
 
 	/* Valid single characters for yyparse */
 [:=;]		{ return yytext[0]; }

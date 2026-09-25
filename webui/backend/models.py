@@ -16,9 +16,16 @@ work against the real parser.
 from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 COMPARISON_OPERATORS = ("<", "<=", "=", ">=", ">")
+
+# Matches this codebase's own convention for a sane hostname/identity bound
+# (libfdproto.h: "#define HOST_NAME_MAX 512"), enforced again in
+# extensions/app_dea/dea_peer_mgmt.c's DEA_MAX_IDLEN on the C side that actually consumes this
+# data -- this is defense in depth, not the only place it's checked, so the two must stay in
+# sync if either changes.
+MAX_IDENTITY_LEN = 512
 
 
 class RuleType(str, Enum):
@@ -109,21 +116,25 @@ class Rule(BaseModel):
 # ---------------------------------------------------------------------------
 
 class DeaIdentity(BaseModel):
-    identity: str
-    realm: str
+    identity: str = Field(min_length=1, max_length=MAX_IDENTITY_LEN)
+    realm: str = Field(min_length=1, max_length=MAX_IDENTITY_LEN)
 
 
 class Peer(BaseModel):
     id: Optional[int] = None
-    diameter_id: str               # the peer's Diameter Identity, e.g. "amf1.epc.mnc001.mcc999.3gppnetwork.org"
+    diameter_id: str = Field(max_length=MAX_IDENTITY_LEN)  # e.g. "amf1.epc.mnc001.mcc999.3gppnetwork.org"
     enabled: bool = True
 
-    connect_to: List[str] = []     # IP addresses / hostnames -> one ConnectTo="..."; per entry
+    # IP addresses / hostnames -> one ConnectTo="..."; per entry. Capped on both dimensions: how
+    # many entries (a legitimate peer has a handful of endpoints, not thousands) and the length
+    # of each one -- an unbounded list or unbounded strings are both a resource-exhaustion vector
+    # once written into the pending-add file the C side parses.
+    connect_to: List[str] = Field(default_factory=list, max_length=32)
     port: Optional[int] = None
-    realm: Optional[str] = None    # reject the peer if it does not advertise this realm
+    realm: Optional[str] = Field(default=None, max_length=MAX_IDENTITY_LEN)  # reject the peer if it does not advertise this realm
     tc_timer: Optional[int] = None
     tw_timer: Optional[int] = None
-    tls_prio: Optional[str] = None
+    tls_prio: Optional[str] = Field(default=None, max_length=128)
 
     no_tls: bool = False
     prefer_tcp: bool = False
@@ -138,6 +149,14 @@ class Peer(BaseModel):
     def diameter_id_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("diameter_id is required")
+        return v
+
+    @field_validator("connect_to")
+    @classmethod
+    def connect_to_entries_bounded(cls, v: List[str]) -> List[str]:
+        for entry in v:
+            if not entry or len(entry) > MAX_IDENTITY_LEN:
+                raise ValueError(f"each connect_to entry must be 1-{MAX_IDENTITY_LEN} characters")
         return v
 
     @field_validator("port")
