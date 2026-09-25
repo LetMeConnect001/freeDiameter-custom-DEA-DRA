@@ -195,3 +195,17 @@ textarea {
 
 .badge-status-up { background: rgba(63,185,80,0.2); color: var(--ok); }
 .badge-status-down { background: rgba(154,162,175,0.2); color: var(--text-dim); }
+
+.hint-text {
+	font-size: 12px;
+	color: var(--text-dim);
+	margin: -4px 0 10px;
+}
+
+.btn-live-add {
+	background: rgba(63,185,80,0.18);
+	color: var(--ok);
+	padding: 4px 8px;
+	font-size: 12px;
+}
+.btn-live-add:hover { background: rgba(63,185,80,0.3); }

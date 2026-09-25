@@ -198,6 +198,48 @@ def apply_daemon_config():
     return {"ok": True, "config": section, "restart_required": True, **result}
 
 
+# ---------------------------------------------------------------------------
+# Peer discovery + live add (extensions/app_dea/dea_peer_mgmt.c)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/discovered-peers")
+def discovered_peers():
+    """Candidates seen knocking (CER) but not yet configured -- read-only, does not affect
+    whether they're accepted (see dea_peer_mgmt.c: the discovery callback always defers to the
+    daemon's own default of rejecting unknown peers)."""
+    return reload_mod.read_discovered_peers()
+
+
+@app.post("/api/peers/{peer_id}/live-add")
+def live_add_peer(peer_id: int):
+    """Add an already-saved Peer live, via fd_peer_add() (SIGUSR2), without restarting
+    freeDiameterd. Does NOT also write it into freeDiameter.conf -- if the daemon restarts later
+    for any other reason, this peer will be gone unless the operator also uses "Écrire la
+    config" to persist it. The two are deliberately separate actions."""
+    peer = storage.get_peer(peer_id)
+    if peer is None:
+        raise HTTPException(404, "Peer not found")
+    try:
+        result = reload_mod.live_add_peer(peer)
+    except reload_mod.ReloadError as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True, **result}
+
+
+@app.post("/api/discovered-peers/{diameter_id}/adopt")
+def adopt_discovered_peer(diameter_id: str):
+    """Turn a discovered candidate into a saved Peer (pre-filled from what its CER told us), so
+    the operator can review/edit it in the normal peer form before deciding whether to live-add
+    and/or persist it to freeDiameter.conf."""
+    candidates = reload_mod.read_discovered_peers()
+    match = next((c for c in candidates if c.get("diameter_id") == diameter_id), None)
+    if match is None:
+        raise HTTPException(404, "Candidate not found (it may have expired from the discovery list)")
+
+    peer = Peer(diameter_id=match["diameter_id"], realm=match.get("realm") or None)
+    return storage.create_peer(peer)
+
+
 # Serve the frontend last, so it doesn't shadow the /api routes above.
 _frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
 app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="static")

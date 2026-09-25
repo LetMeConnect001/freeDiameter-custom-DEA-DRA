@@ -163,6 +163,30 @@
 		</form>
 	</section>
 
+	<section id="discoveredPeersSection">
+		<div class="section-header-row">
+			<h2>Peers découverts (non configurés)</h2>
+			<button id="refreshDiscoveredBtn" class="btn-secondary btn-small">Rafraîchir</button>
+		</div>
+		<p class="hint-text">
+			Ces hôtes ont envoyé un CER mais ne sont pas configurés -- ils sont toujours
+			<strong>rejetés</strong> par freeDiameter (comportement inchangé). "Adopter" les
+			ajoute simplement au formulaire Peers ci-dessous pour relecture avant tout ajout réel.
+		</p>
+		<table id="discoveredTable">
+			<thead>
+				<tr>
+					<th>Diameter-Id</th>
+					<th>Realm</th>
+					<th>Tentatives</th>
+					<th>Vu pour la dernière fois</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody id="discoveredTableBody"></tbody>
+		</table>
+	</section>
+
 	<section id="peerListSection">
 		<h2>Peers</h2>
 		<table id="peerTable">

@@ -8,6 +8,7 @@ the process to reload its config."). This module writes the file, then finds the
 process and sends it that signal -- no restart needed.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -20,6 +21,9 @@ DAEMON_CONF_PATH_ENV = "FREEDIAMETER_CONF_PATH"
 PID_FILE_ENV = "FREEDIAMETER_PID_FILE"
 PROCESS_NAME_ENV = "FREEDIAMETER_PROCESS_NAME"
 DEFAULT_PROCESS_NAME = "freeDiameterd"
+
+DISCOVERED_PEERS_FILE_ENV = "DEA_DISCOVERED_PEERS_FILE"
+PENDING_PEER_ADD_FILE_ENV = "DEA_PENDING_PEER_ADD_FILE"
 
 
 class ReloadError(Exception):
@@ -136,3 +140,78 @@ def backup_daemon_config() -> dict:
     conf_path = _daemon_conf_path()
     backup_path = backup_mod.backup_file(conf_path)
     return {"conf_path": conf_path, "backup_path": backup_path}
+
+
+# ---------------------------------------------------------------------------
+# Peer discovery + live add (extensions/app_dea/dea_peer_mgmt.c)
+# ---------------------------------------------------------------------------
+
+def read_discovered_peers() -> list:
+    """Read the JSON file dea_peer_mgmt.c writes on every newly-discovered candidate. Returns []
+    if discovery isn't configured/running yet -- not an error, just nothing to show."""
+    path = os.environ.get(DISCOVERED_PEERS_FILE_ENV)
+    if not path or not os.path.exists(path):
+        return []
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # Being read mid-write by the extension (it writes via temp-file + rename, but a
+        # concurrent read landing exactly between those isn't impossible) -- treat as
+        # "nothing to show yet" rather than a hard error, the next poll will see it.
+        return []
+
+
+def _peer_to_pending_line(peer) -> str:
+    """Serialize a models.Peer into the exact 'key=value;key=value' format
+    extensions/app_dea/dea_peer_mgmt.c's parse_pending_line() expects (see that file's header
+    comment for the authoritative format -- this must stay in sync with it)."""
+    parts = [f"diamid={peer.diameter_id}"]
+    if peer.connect_to:
+        parts.append(f"connect_to={','.join(peer.connect_to)}")
+    if peer.port is not None:
+        parts.append(f"port={peer.port}")
+    if peer.realm:
+        parts.append(f"realm={peer.realm}")
+    if peer.tc_timer is not None:
+        parts.append(f"tc_timer={peer.tc_timer}")
+    if peer.tw_timer is not None:
+        parts.append(f"tw_timer={peer.tw_timer}")
+    if peer.tls_prio:
+        parts.append(f"tls_prio={peer.tls_prio}")
+    for flag in ("no_tls", "prefer_tcp", "no_tcp", "no_sctp", "no_ip", "no_ipv6", "tls_old_method"):
+        if getattr(peer, flag):
+            parts.append(f"{flag}=1")
+    return ";".join(parts)
+
+
+def live_add_peer(peer) -> dict:
+    """Write a pending-add entry and signal app_dea to process it via fd_peer_add() -- the peer
+    connects without a freeDiameterd restart. See extensions/app_dea/dea_peer_mgmt.c.
+
+    KNOWN LIMITATION: appending to this file and signaling it are two separate, non-atomic
+    steps, and app_dea deletes the file unconditionally once it finishes reading it. Two
+    live-adds close enough in time (milliseconds) can race: a second append landing after the
+    extension already finished reading but before it called remove() would be lost. Low-risk in
+    practice (this is an operator clicking "add" in a UI, not a high-frequency automated path),
+    and the failure mode is "silently not added, retry it" rather than data corruption or a
+    security issue -- not worth a lock-file protocol for this first version."""
+    path = os.environ.get(PENDING_PEER_ADD_FILE_ENV)
+    if not path:
+        raise ReloadError(
+            f"{PENDING_PEER_ADD_FILE_ENV} is not set -- point it at the same path as "
+            f"app_dea.conf's pending_peer_add_file directive."
+        )
+
+    line = _peer_to_pending_line(peer)
+
+    # Append (not overwrite): app_dea processes and deletes the file on each SIGUSR2, but if
+    # several adds are queued between signals, appending lets them all ride the next signal
+    # instead of racing each other's overwrite.
+    with open(path, "a") as f:
+        f.write(line + "\n")
+
+    pid = _find_pid()
+    os.kill(pid, signal.SIGUSR2)
+
+    return {"pending_file": path, "pid": pid, "line": line}

@@ -278,6 +278,7 @@ function switchTab(tab) {
 	if (tab === "peers") {
 		loadIdentity();
 		loadPeers();
+		loadDiscoveredPeers();
 	}
 }
 
@@ -356,6 +357,7 @@ async function loadPeers() {
 			<td><code>${escapeHtml(peerOptionsSummary(peer))}</code></td>
 			<td><span class="badge badge-status-down" title="Pas encore implémenté">inconnu</span></td>
 			<td>
+				<button class="btn-live-add" data-action="live-add-peer" data-id="${peer.id}" title="Ajoute ce peer maintenant via fd_peer_add(), sans redémarrer freeDiameterd. N'écrit PAS dans freeDiameter.conf -- utilise 'Écrire la config' pour le rendre permanent.">⚡ Live-add</button>
 				<button class="btn-icon" data-action="edit-peer" data-id="${peer.id}">Éditer</button>
 				<button class="btn-danger" data-action="delete-peer" data-id="${peer.id}">Suppr.</button>
 			</td>
@@ -368,6 +370,9 @@ async function loadPeers() {
 	});
 	tbody.querySelectorAll("[data-action=delete-peer]").forEach((btn) => {
 		btn.addEventListener("click", () => deletePeer(parseInt(btn.dataset.id, 10)));
+	});
+	tbody.querySelectorAll("[data-action=live-add-peer]").forEach((btn) => {
+		btn.addEventListener("click", () => liveAddPeer(parseInt(btn.dataset.id, 10)));
 	});
 
 	await refreshDaemonPreview();
@@ -482,6 +487,71 @@ async function applyDaemonConfig() {
 		showStatus("Échec: " + e.message, "error");
 	}
 }
+
+async function liveAddPeer(id) {
+	if (!confirm("Ajouter ce peer maintenant sans redémarrer freeDiameterd ? (n'écrit pas dans freeDiameter.conf -- utilise 'Écrire la config' séparément pour le rendre permanent)")) return;
+	try {
+		const result = await api(`/peers/${id}/live-add`, { method: "POST" });
+		showStatus(`Peer ajouté en live (signal envoyé au pid ${result.pid}). Vérifie les logs freeDiameter pour confirmer la connexion.`, "ok");
+	} catch (e) {
+		showStatus("Échec du live-add: " + e.message, "error");
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Discovered peers                                                     */
+/* ------------------------------------------------------------------ */
+
+function formatTimestamp(unixSeconds) {
+	if (!unixSeconds) return "—";
+	return new Date(unixSeconds * 1000).toLocaleString("fr-FR");
+}
+
+async function loadDiscoveredPeers() {
+	let candidates = [];
+	try {
+		candidates = await api("/discovered-peers");
+	} catch (e) {
+		showStatus("Erreur chargement peers découverts: " + e.message, "error");
+	}
+
+	const tbody = el("discoveredTableBody");
+	tbody.innerHTML = "";
+
+	if (candidates.length === 0) {
+		tbody.innerHTML = `<tr><td colspan="5" class="hint-text">Aucun peer inconnu détecté pour l'instant.</td></tr>`;
+		return;
+	}
+
+	for (const c of candidates) {
+		const tr = document.createElement("tr");
+		tr.innerHTML = `
+			<td>${escapeHtml(c.diameter_id)}</td>
+			<td>${escapeHtml(c.realm || "—")}</td>
+			<td>${c.attempts ?? "—"}</td>
+			<td>${formatTimestamp(c.last_seen)}</td>
+			<td><button class="btn-secondary btn-small" data-action="adopt-peer" data-id="${escapeHtml(c.diameter_id)}">Adopter</button></td>
+		`;
+		tbody.appendChild(tr);
+	}
+
+	tbody.querySelectorAll("[data-action=adopt-peer]").forEach((btn) => {
+		btn.addEventListener("click", () => adoptDiscoveredPeer(btn.dataset.id));
+	});
+}
+
+async function adoptDiscoveredPeer(diameterId) {
+	try {
+		const peer = await api(`/discovered-peers/${encodeURIComponent(diameterId)}/adopt`, { method: "POST" });
+		showStatus(`"${diameterId}" ajouté au formulaire Peers -- relis/complète avant d'appliquer.`, "ok");
+		await loadPeers();
+		fillPeerForm(peer);
+	} catch (e) {
+		showStatus("Erreur: " + e.message, "error");
+	}
+}
+
+el("refreshDiscoveredBtn").addEventListener("click", loadDiscoveredPeers);
 
 async function backupDaemonConfig() {
 	try {
