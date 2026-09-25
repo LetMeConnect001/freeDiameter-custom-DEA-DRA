@@ -88,3 +88,61 @@ class Rule(BaseModel):
                 raise ValueError("add rules require dest_avp_path (where to add the AVP)")
             if self.value is None:
                 raise ValueError("add rules require a value")
+
+
+# ---------------------------------------------------------------------------
+# Daemon-level config: Identity/Realm and ConnectPeer entries.
+#
+# Grammar verified directly against libfdcore/fdd.y (the real freeDiameter.conf parser), not
+# guessed from the commented sample:
+#   identity:  IDENTITY '=' QSTRING ';'
+#   realm:     REALM '=' QSTRING ';'
+#   ConnectPeer '=' QSTRING peerinfo ';'
+#   peerinfo:  /* empty */ | '{' peerparams '}'
+#   peerparams: ... | REALM '=' QSTRING ';' | PORT '=' INTEGER ';' | TCTIMER '=' INTEGER ';'
+#             | TWTIMER '=' INTEGER ';' | TLS_PRIO '=' QSTRING ';' | CONNTO '=' QSTRING ';'
+#             | NOIP ';' | NOIP6 ';' | NOTCP ';' | NOSCTP ';' | PREFERTCP ';' | OLDTLS ';' | NOTLS ';'
+#
+# Unlike Rule/rt_rewrite.conf, this does NOT own the whole target file: freeDiameter.conf also
+# carries TLS_Cred/TLS_CA/LoadExtension/etc. set up by hand, which must never be clobbered. See
+# daemon_config.py for the marked-section merge strategy.
+# ---------------------------------------------------------------------------
+
+class DeaIdentity(BaseModel):
+    identity: str
+    realm: str
+
+
+class Peer(BaseModel):
+    id: Optional[int] = None
+    diameter_id: str               # the peer's Diameter Identity, e.g. "amf1.epc.mnc001.mcc999.3gppnetwork.org"
+    enabled: bool = True
+
+    connect_to: List[str] = []     # IP addresses / hostnames -> one ConnectTo="..."; per entry
+    port: Optional[int] = None
+    realm: Optional[str] = None    # reject the peer if it does not advertise this realm
+    tc_timer: Optional[int] = None
+    tw_timer: Optional[int] = None
+    tls_prio: Optional[str] = None
+
+    no_tls: bool = False
+    prefer_tcp: bool = False
+    no_ip: bool = False
+    no_ipv6: bool = False
+    no_tcp: bool = False
+    no_sctp: bool = False
+    tls_old_method: bool = False
+
+    @field_validator("diameter_id")
+    @classmethod
+    def diameter_id_not_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("diameter_id is required")
+        return v
+
+    @field_validator("port")
+    @classmethod
+    def port_in_range(cls, v):
+        if v is not None and not (0 <= v < 65536):
+            raise ValueError("port must be between 0 and 65535")
+        return v

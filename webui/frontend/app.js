@@ -239,6 +239,15 @@ async function applyRules() {
 	}
 }
 
+async function backupRules() {
+	try {
+		const result = await api("/backup/rt_rewrite", { method: "POST" });
+		showStatus(`Sauvegardé : ${result.backup_path || "(rien à sauvegarder, fichier inexistant)"}`, "ok");
+	} catch (e) {
+		showStatus("Échec de la sauvegarde: " + e.message, "error");
+	}
+}
+
 el("newRuleBtn").addEventListener("click", () => {
 	resetForm();
 	el("formSection").hidden = false;
@@ -253,6 +262,248 @@ el("f_hasCondition").addEventListener("change", () => {
 });
 el("ruleForm").addEventListener("submit", saveRule);
 el("applyBtn").addEventListener("click", applyRules);
+el("backupRulesBtn").addEventListener("click", backupRules);
+
+/* ------------------------------------------------------------------ */
+/* Tabs                                                                 */
+/* ------------------------------------------------------------------ */
+
+function switchTab(tab) {
+	document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+	el("tab-rules").hidden = tab !== "rules";
+	el("tab-peers").hidden = tab !== "peers";
+	el("applyBtn").hidden = tab !== "rules";
+	el("applyDaemonBtn").hidden = tab !== "peers";
+	el("pageTitle").textContent = tab === "rules" ? "Règles AVP (rt_rewrite)" : "Peers & Identité (freeDiameter.conf)";
+	if (tab === "peers") {
+		loadIdentity();
+		loadPeers();
+	}
+}
+
+document.querySelectorAll(".tab-btn").forEach((b) => {
+	b.addEventListener("click", () => switchTab(b.dataset.tab));
+});
+
+/* ------------------------------------------------------------------ */
+/* Identity                                                             */
+/* ------------------------------------------------------------------ */
+
+async function loadIdentity() {
+	try {
+		const identity = await api("/identity");
+		if (identity) {
+			el("f_identity").value = identity.identity;
+			el("f_realm").value = identity.realm;
+		}
+	} catch (e) {
+		showStatus("Erreur chargement identité: " + e.message, "error");
+	}
+	await refreshDaemonPreview();
+}
+
+async function saveIdentity(e) {
+	e.preventDefault();
+	try {
+		await api("/identity", {
+			method: "PUT",
+			body: JSON.stringify({ identity: el("f_identity").value, realm: el("f_realm").value }),
+		});
+		showStatus("Identité enregistrée (pas encore écrite dans freeDiameter.conf -- clique 'Écrire la config').", "ok");
+		await refreshDaemonPreview();
+	} catch (e) {
+		showStatus("Erreur: " + e.message, "error");
+	}
+}
+
+el("identityForm").addEventListener("submit", saveIdentity);
+
+/* ------------------------------------------------------------------ */
+/* Peers                                                                */
+/* ------------------------------------------------------------------ */
+
+let editingPeerId = null;
+
+function splitLines(text) {
+	return text.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+function peerOptionsSummary(peer) {
+	const opts = [];
+	if (peer.no_tls) opts.push("No_TLS");
+	if (peer.prefer_tcp) opts.push("Prefer_TCP");
+	if (peer.no_tcp) opts.push("No_TCP");
+	if (peer.no_sctp) opts.push("No_SCTP");
+	if (peer.no_ip) opts.push("No_IP");
+	if (peer.no_ipv6) opts.push("No_IPv6");
+	if (peer.tls_old_method) opts.push("TLS_old_method");
+	if (peer.port) opts.push(`Port=${peer.port}`);
+	return opts.join(", ") || "—";
+}
+
+async function loadPeers() {
+	const peers = await api("/peers");
+	const tbody = el("peerTableBody");
+	tbody.innerHTML = "";
+
+	for (const peer of peers) {
+		const tr = document.createElement("tr");
+		tr.innerHTML = `
+			<td><span class="badge ${peer.enabled ? "badge-move" : "badge-off"}">${peer.enabled ? "on" : "off"}</span></td>
+			<td>${escapeHtml(peer.diameter_id)}</td>
+			<td><code>${escapeHtml((peer.connect_to || []).join(", "))}</code></td>
+			<td>${escapeHtml(peer.realm || "—")}</td>
+			<td><code>${escapeHtml(peerOptionsSummary(peer))}</code></td>
+			<td><span class="badge badge-status-down" title="Pas encore implémenté">inconnu</span></td>
+			<td>
+				<button class="btn-icon" data-action="edit-peer" data-id="${peer.id}">Éditer</button>
+				<button class="btn-danger" data-action="delete-peer" data-id="${peer.id}">Suppr.</button>
+			</td>
+		`;
+		tbody.appendChild(tr);
+	}
+
+	tbody.querySelectorAll("[data-action=edit-peer]").forEach((btn) => {
+		btn.addEventListener("click", () => editPeer(parseInt(btn.dataset.id, 10)));
+	});
+	tbody.querySelectorAll("[data-action=delete-peer]").forEach((btn) => {
+		btn.addEventListener("click", () => deletePeer(parseInt(btn.dataset.id, 10)));
+	});
+
+	await refreshDaemonPreview();
+}
+
+async function refreshDaemonPreview() {
+	try {
+		const { config } = await api("/daemon-config/preview");
+		el("daemonPreviewText").textContent = config || "(rien -- configure l'identité et au moins un peer)";
+	} catch (e) {
+		el("daemonPreviewText").textContent = "Erreur de génération: " + e.message;
+	}
+}
+
+function resetPeerForm() {
+	editingPeerId = null;
+	el("peerFormTitle").textContent = "Nouveau peer";
+	el("peerForm").reset();
+	el("p_enabled").checked = true;
+}
+
+function fillPeerForm(peer) {
+	editingPeerId = peer.id;
+	el("peerFormTitle").textContent = "Éditer le peer";
+	el("p_diameter_id").value = peer.diameter_id;
+	el("p_connect_to").value = (peer.connect_to || []).join("\n");
+	el("p_port").value = peer.port ?? "";
+	el("p_realm").value = peer.realm || "";
+	el("p_tc_timer").value = peer.tc_timer ?? "";
+	el("p_tw_timer").value = peer.tw_timer ?? "";
+	el("p_tls_prio").value = peer.tls_prio || "";
+	el("p_no_tls").checked = !!peer.no_tls;
+	el("p_prefer_tcp").checked = !!peer.prefer_tcp;
+	el("p_no_tcp").checked = !!peer.no_tcp;
+	el("p_no_sctp").checked = !!peer.no_sctp;
+	el("p_no_ip").checked = !!peer.no_ip;
+	el("p_no_ipv6").checked = !!peer.no_ipv6;
+	el("p_tls_old_method").checked = !!peer.tls_old_method;
+	el("p_enabled").checked = peer.enabled;
+
+	el("peerFormSection").hidden = false;
+	el("peerFormSection").scrollIntoView({ behavior: "smooth" });
+}
+
+async function editPeer(id) {
+	const peer = await api(`/peers/${id}`);
+	fillPeerForm(peer);
+}
+
+async function deletePeer(id) {
+	if (!confirm("Supprimer ce peer ?")) return;
+	try {
+		await api(`/peers/${id}`, { method: "DELETE" });
+		showStatus("Peer supprimé.", "ok");
+		await loadPeers();
+	} catch (e) {
+		showStatus("Erreur: " + e.message, "error");
+	}
+}
+
+function intOrNull(v) {
+	const s = (v || "").trim();
+	if (!s) return null;
+	const n = parseInt(s, 10);
+	return Number.isNaN(n) ? null : n;
+}
+
+function buildPeerFromForm() {
+	return {
+		diameter_id: el("p_diameter_id").value,
+		enabled: el("p_enabled").checked,
+		connect_to: splitLines(el("p_connect_to").value),
+		port: intOrNull(el("p_port").value),
+		realm: el("p_realm").value || null,
+		tc_timer: intOrNull(el("p_tc_timer").value),
+		tw_timer: intOrNull(el("p_tw_timer").value),
+		tls_prio: el("p_tls_prio").value || null,
+		no_tls: el("p_no_tls").checked,
+		prefer_tcp: el("p_prefer_tcp").checked,
+		no_tcp: el("p_no_tcp").checked,
+		no_sctp: el("p_no_sctp").checked,
+		no_ip: el("p_no_ip").checked,
+		no_ipv6: el("p_no_ipv6").checked,
+		tls_old_method: el("p_tls_old_method").checked,
+	};
+}
+
+async function savePeer(e) {
+	e.preventDefault();
+	const peer = buildPeerFromForm();
+	try {
+		if (editingPeerId) {
+			await api(`/peers/${editingPeerId}`, { method: "PUT", body: JSON.stringify(peer) });
+		} else {
+			await api("/peers", { method: "POST", body: JSON.stringify(peer) });
+		}
+		showStatus("Peer enregistré.", "ok");
+		el("peerFormSection").hidden = true;
+		resetPeerForm();
+		await loadPeers();
+	} catch (err) {
+		showStatus("Erreur: " + err.message, "error");
+	}
+}
+
+async function applyDaemonConfig() {
+	if (!confirm("Écrire Identity/Realm/Peers dans freeDiameter.conf maintenant ? (redémarrage manuel du daemon nécessaire ensuite)")) return;
+	try {
+		const result = await api("/daemon-config/apply", { method: "POST" });
+		showStatus(`Écrit dans ${result.conf_path} (backup: ${result.backup_path || "aucun"}). Redémarre freeDiameterd pour appliquer.`, "ok");
+	} catch (e) {
+		showStatus("Échec: " + e.message, "error");
+	}
+}
+
+async function backupDaemonConfig() {
+	try {
+		const result = await api("/backup/daemon", { method: "POST" });
+		showStatus(`Sauvegardé : ${result.backup_path || "(rien à sauvegarder, fichier inexistant)"}`, "ok");
+	} catch (e) {
+		showStatus("Échec de la sauvegarde: " + e.message, "error");
+	}
+}
+
+el("newPeerBtn").addEventListener("click", () => {
+	resetPeerForm();
+	el("peerFormSection").hidden = false;
+	el("peerFormSection").scrollIntoView({ behavior: "smooth" });
+});
+el("peerCancelBtn").addEventListener("click", () => {
+	el("peerFormSection").hidden = true;
+});
+el("peerForm").addEventListener("submit", savePeer);
+el("applyDaemonBtn").addEventListener("click", applyDaemonConfig);
+el("backupDaemonBtn").addEventListener("click", backupDaemonConfig);
 
 resetForm();
+resetPeerForm();
 loadRules();

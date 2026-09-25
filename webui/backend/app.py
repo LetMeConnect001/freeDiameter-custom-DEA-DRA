@@ -13,9 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 import config_generator
+import daemon_config
 import reload as reload_mod
 import storage
-from models import Rule
+from models import DeaIdentity, Peer, Rule
 
 app = FastAPI(title="rt_rewrite rule manager")
 
@@ -87,6 +88,114 @@ def apply_rules():
         raise HTTPException(500, str(e))
 
     return {"ok": True, "config": config_text, **result}
+
+
+@app.post("/api/backup/rt_rewrite")
+def backup_rt_rewrite():
+    try:
+        return reload_mod.backup_rt_rewrite_config()
+    except reload_mod.ReloadError as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/api/backup/daemon")
+def backup_daemon():
+    try:
+        return reload_mod.backup_daemon_config()
+    except reload_mod.ReloadError as e:
+        raise HTTPException(500, str(e))
+
+
+# ---------------------------------------------------------------------------
+# Peers + DEA identity (Identity/Realm/ConnectPeer, in freeDiameter.conf)
+#
+# IMPORTANT: unlike rt_rewrite, the daemon has no live-reload for these -- Apply here only
+# writes the file (with a backup taken first). Applying it requires a manual restart of
+# freeDiameterd to take effect. The response's `restart_required: true` flag exists so the
+# frontend never has to guess this, and must surface it, not paper over it.
+# ---------------------------------------------------------------------------
+
+@app.get("/api/peers")
+def list_peers():
+    return storage.list_peers()
+
+
+@app.get("/api/peers/{peer_id}")
+def get_peer(peer_id: int):
+    peer = storage.get_peer(peer_id)
+    if peer is None:
+        raise HTTPException(404, "Peer not found")
+    return peer
+
+
+@app.post("/api/peers")
+def create_peer(peer: Peer):
+    try:
+        return storage.create_peer(peer)
+    except (ValueError, ValidationError) as e:
+        raise HTTPException(422, str(e))
+
+
+@app.put("/api/peers/{peer_id}")
+def update_peer(peer_id: int, peer: Peer):
+    try:
+        updated = storage.update_peer(peer_id, peer)
+    except (ValueError, ValidationError) as e:
+        raise HTTPException(422, str(e))
+    if updated is None:
+        raise HTTPException(404, "Peer not found")
+    return updated
+
+
+@app.delete("/api/peers/{peer_id}")
+def delete_peer(peer_id: int):
+    if not storage.delete_peer(peer_id):
+        raise HTTPException(404, "Peer not found")
+    return {"ok": True}
+
+
+@app.get("/api/identity")
+def get_identity():
+    identity = storage.get_identity()
+    if identity is None:
+        # Not configured yet through the UI -- not an error, the frontend shows an empty form.
+        return None
+    return identity
+
+
+@app.put("/api/identity")
+def set_identity(identity: DeaIdentity):
+    return storage.set_identity(identity)
+
+
+@app.get("/api/daemon-config/preview")
+def preview_daemon_config():
+    identity = storage.get_identity()
+    if identity is None:
+        raise HTTPException(422, "Set the DEA Identity and Realm before previewing.")
+    try:
+        return {"config": daemon_config.generate_managed_section(identity, storage.list_peers())}
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/api/daemon-config/apply")
+def apply_daemon_config():
+    identity = storage.get_identity()
+    if identity is None:
+        raise HTTPException(422, "Set the DEA Identity and Realm before applying.")
+
+    try:
+        section = daemon_config.generate_managed_section(identity, storage.list_peers())
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+
+    try:
+        result = reload_mod.write_daemon_config(section)
+    except reload_mod.ReloadError as e:
+        raise HTTPException(500, str(e))
+
+    return {"ok": True, "config": section, "restart_required": True, **result}
 
 
 # Serve the frontend last, so it doesn't shadow the /api routes above.

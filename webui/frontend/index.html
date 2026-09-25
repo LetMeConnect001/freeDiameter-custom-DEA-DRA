@@ -3,19 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>rt_rewrite Rule Manager</title>
+<title>freeDiameter DEA Manager</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
 <header>
-	<h1>Règles AVP (rt_rewrite)</h1>
+	<h1 id="pageTitle">Règles AVP (rt_rewrite)</h1>
 	<button id="applyBtn" class="btn-primary">Appliquer et recharger</button>
+	<button id="applyDaemonBtn" class="btn-primary" hidden>Écrire la config (redémarrage requis)</button>
 </header>
+
+<nav class="tabs">
+	<button class="tab-btn active" data-tab="rules">Règles AVP</button>
+	<button class="tab-btn" data-tab="peers">Peers &amp; Identité</button>
+</nav>
 
 <div id="statusBar" class="status-bar" hidden></div>
 
-<main>
+<main id="tab-rules">
 	<section id="ruleListSection">
 		<h2>Règles</h2>
 		<table id="ruleTable">
@@ -126,8 +132,112 @@
 	</section>
 
 	<section id="previewSection">
-		<h2>Aperçu de la config générée</h2>
+		<div class="section-header-row">
+			<h2>Aperçu de la config générée</h2>
+			<button id="backupRulesBtn" class="btn-secondary btn-small">Sauvegarder rt_rewrite.conf</button>
+		</div>
 		<pre id="previewText">(chargement...)</pre>
+	</section>
+</main>
+
+<main id="tab-peers" hidden>
+	<section id="identitySection">
+		<div class="section-header-row">
+			<h2>Identité du DEA</h2>
+			<button id="backupDaemonBtn" class="btn-secondary btn-small">Sauvegarder freeDiameter.conf</button>
+		</div>
+		<div class="warning-banner">
+			⚠️ Identity / Realm / Peers ne se rechargent PAS à chaud — un redémarrage manuel de
+			<code>freeDiameterd</code> est nécessaire après "Écrire la config".
+		</div>
+		<form id="identityForm" class="inline-form">
+			<label>
+				Identity (nom Diameter du DEA)
+				<input type="text" id="f_identity" required placeholder="ex: dea1.mnc001.mcc999.3gppnetwork.org">
+			</label>
+			<label>
+				Realm
+				<input type="text" id="f_realm" required placeholder="ex: epc.mnc001.mcc999.3gppnetwork.org">
+			</label>
+			<button type="submit" class="btn-primary">Enregistrer l'identité</button>
+		</form>
+	</section>
+
+	<section id="peerListSection">
+		<h2>Peers</h2>
+		<table id="peerTable">
+			<thead>
+				<tr>
+					<th></th>
+					<th>Diameter-Id</th>
+					<th>Connect-To</th>
+					<th>Realm attendu</th>
+					<th>Options</th>
+					<th>Statut</th>
+					<th></th>
+				</tr>
+			</thead>
+			<tbody id="peerTableBody"></tbody>
+		</table>
+		<button id="newPeerBtn" class="btn-secondary">+ Nouveau peer</button>
+	</section>
+
+	<section id="peerFormSection" hidden>
+		<h2 id="peerFormTitle">Nouveau peer</h2>
+		<form id="peerForm">
+			<label>
+				Diameter-Id du peer
+				<input type="text" id="p_diameter_id" required placeholder="ex: amf1.epc.mnc001.mcc999.3gppnetwork.org">
+			</label>
+			<label>
+				Adresse(s) à contacter (une par ligne, IP ou hostname)
+				<textarea id="p_connect_to" rows="2" placeholder="10.0.0.5"></textarea>
+			</label>
+			<label>
+				Port (optionnel)
+				<input type="text" id="p_port" placeholder="ex: 3868">
+			</label>
+			<label>
+				Realm attendu (rejette le peer s'il n'annonce pas ce realm)
+				<input type="text" id="p_realm" placeholder="ex: epc.mnc001.mcc999.3gppnetwork.org">
+			</label>
+			<label>
+				Tc Timer / Tw Timer (secondes, optionnel)
+				<div class="inline-pair">
+					<input type="text" id="p_tc_timer" placeholder="30">
+					<input type="text" id="p_tw_timer" placeholder="30">
+				</div>
+			</label>
+			<label>
+				TLS_Prio (optionnel)
+				<input type="text" id="p_tls_prio" placeholder='ex: NORMAL'>
+			</label>
+
+			<div class="checkbox-grid">
+				<label class="checkbox-row"><input type="checkbox" id="p_no_tls"> No_TLS</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_prefer_tcp"> Prefer_TCP</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_no_tcp"> No_TCP</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_no_sctp"> No_SCTP</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_no_ip"> No_IP</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_no_ipv6"> No_IPv6</label>
+				<label class="checkbox-row"><input type="checkbox" id="p_tls_old_method"> TLS_old_method</label>
+			</div>
+
+			<label class="checkbox-row">
+				<input type="checkbox" id="p_enabled" checked>
+				Peer actif
+			</label>
+
+			<div class="form-actions">
+				<button type="submit" class="btn-primary">Enregistrer</button>
+				<button type="button" id="peerCancelBtn" class="btn-secondary">Annuler</button>
+			</div>
+		</form>
+	</section>
+
+	<section id="daemonPreviewSection">
+		<h2>Aperçu de la section générée (Identity/Realm/ConnectPeer)</h2>
+		<pre id="daemonPreviewText">(chargement...)</pre>
 	</section>
 </main>
 

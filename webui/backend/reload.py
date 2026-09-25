@@ -12,7 +12,11 @@ import os
 import signal
 import subprocess
 
+import backup as backup_mod
+import daemon_config
+
 CONF_PATH_ENV = "RT_REWRITE_CONF_PATH"
+DAEMON_CONF_PATH_ENV = "FREEDIAMETER_CONF_PATH"
 PID_FILE_ENV = "FREEDIAMETER_PID_FILE"
 PROCESS_NAME_ENV = "FREEDIAMETER_PROCESS_NAME"
 DEFAULT_PROCESS_NAME = "freeDiameterd"
@@ -81,3 +85,54 @@ def apply_and_reload(config_text: str) -> dict:
     pid = _find_pid()
     os.kill(pid, signal.SIGUSR1)
     return {"conf_path": conf_path, "pid": pid}
+
+
+def _daemon_conf_path() -> str:
+    path = os.environ.get(DAEMON_CONF_PATH_ENV)
+    if not path:
+        raise ReloadError(
+            f"{DAEMON_CONF_PATH_ENV} is not set -- point it at your main freeDiameter.conf path "
+            f"(the one passed to freeDiameterd -c)."
+        )
+    return path
+
+
+def write_daemon_config(managed_section_text: str) -> dict:
+    """Merge managed_section_text (Identity/Realm/ConnectPeer, see daemon_config.py) into
+    freeDiameter.conf, backing up the previous version first. Everything outside the marked
+    section (TLS_Cred, LoadExtension, timers, ...) is preserved untouched.
+
+    Deliberately does NOT signal or restart the daemon: unlike rt_rewrite, freeDiameter's core
+    has no live-reload for Identity/Realm/peers -- see daemon_config.py's module docstring. The
+    API layer must make the "restart required" fact clear to the caller.
+    """
+    conf_path = _daemon_conf_path()
+
+    existing = ""
+    if os.path.exists(conf_path):
+        with open(conf_path) as f:
+            existing = f.read()
+
+    backup_path = backup_mod.backup_file(conf_path)
+    merged = daemon_config.merge_managed_section(existing, managed_section_text)
+
+    tmp_path = conf_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(merged)
+    os.replace(tmp_path, conf_path)
+
+    return {"conf_path": conf_path, "backup_path": backup_path}
+
+
+def backup_rt_rewrite_config() -> dict:
+    """Manual backup of rt_rewrite.conf on demand (independent of an Apply -- the 'Backup' button
+    the operator can hit any time, not just as a side effect of writing a new version)."""
+    conf_path = _conf_path()
+    backup_path = backup_mod.backup_file(conf_path)
+    return {"conf_path": conf_path, "backup_path": backup_path}
+
+
+def backup_daemon_config() -> dict:
+    conf_path = _daemon_conf_path()
+    backup_path = backup_mod.backup_file(conf_path)
+    return {"conf_path": conf_path, "backup_path": backup_path}
